@@ -209,3 +209,67 @@ def masked_weighted_f1(
     y_t = np.array(y_true)[mask]
     y_p = np.array(y_pred)[mask]
     return float(f1_score(y_t, y_p, average="weighted"))
+
+
+# ============================================================
+# Pipeline validation
+# ============================================================
+
+def validate_label_encoding(df: pd.DataFrame, task: str) -> Dict[str, int]:
+    """
+    Validate label encoding matches spec for a given task.
+    
+    Rules:
+    - EXP: must have values in {0,1,2,3,4} (grades 1,2,3,4,5)
+    - ICM/TE: valid values {0,1,2} (A,B,C); ND/NA/empty are excluded but not errors
+    
+    Args:
+        df: DataFrame with label columns
+        task: 'exp', 'icm', or 'te'
+        
+    Returns:
+        dict with counts: {'class_0': N, 'class_1': N, ...}
+        
+    Raises:
+        ValueError if encoding is invalid
+    """
+    task = task.lower()
+    if task == "exp":
+        exp_vals = df["EXP"].dropna()
+        exp_numeric = pd.to_numeric(exp_vals, errors="coerce")
+        bad = exp_numeric[exp_numeric.isna()].index.tolist()
+        if len(bad) > 0:
+            raise ValueError(f"[{task}] Non-numeric EXP values at indices {bad}: {exp_vals.loc[bad].tolist()}")
+        
+        valid = set([0, 1, 2, 3, 4])
+        uniq = set(exp_numeric.astype(int).unique())
+        invalid = uniq - valid
+        if invalid:
+            raise ValueError(f"[{task}] Invalid EXP classes {invalid}. Expected {{0,1,2,3,4}}")
+        
+        counts = exp_numeric.astype(int).value_counts().sort_index().to_dict()
+        return counts
+    
+    elif task in ["icm", "te"]:
+        col = task.upper()
+        if col not in df.columns:
+            raise KeyError(f"Column '{col}' not found in DataFrame")
+        
+        tokens = df[col].apply(normalize_token)
+        valid_mask = tokens.isin(["0", "1", "2"])
+        valid_tokens = tokens[valid_mask]
+        
+        if len(valid_tokens) == 0:
+            raise ValueError(f"[{task}] No valid labels (0/1/2) found. Found: {set(tokens.unique())}")
+        
+        counts = valid_tokens.astype(int).value_counts().sort_index().to_dict()
+        n_total = len(tokens)
+        n_valid = len(valid_tokens)
+        n_excluded = n_total - n_valid
+        
+        print(f"[{task}] Total: {n_total} | Valid(0/1/2): {n_valid} | Excluded: {n_excluded}")
+        return counts
+    
+    else:
+        raise ValueError(f"Unknown task: {task}")
+

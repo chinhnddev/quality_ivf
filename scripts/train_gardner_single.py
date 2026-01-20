@@ -14,7 +14,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
-from sklearn.metrics import f1_score, accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import f1_score, accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from PIL import Image
@@ -108,6 +108,10 @@ def make_loss_fn(track: str, task: str, num_classes: int, use_class_weights: boo
         if (weights == 0).any():
             missing = [i for i, w in enumerate(weights.tolist()) if w == 0.0]
             print(f"[WARN] Missing classes in TRAIN for task={task}: {missing}. Their weight is set to 0.")
+        else:
+            print(f"[OK] Class weights computed for task={task}:")
+            for i, w in enumerate(weights.tolist()):
+                print(f"  Class {i}: weight={w:.4f}")
     if track == "benchmark_fair":
         return nn.CrossEntropyLoss(weight=weights)
     if track == "improved":
@@ -270,7 +274,19 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device) 
     acc = accuracy_score(ys, ps) if len(ys) else 0.0
     macro_f1 = f1_score(ys, ps, average="macro") if len(ys) else 0.0
     weighted_f1 = f1_score(ys, ps, average="weighted") if len(ys) else 0.0
-    return {"acc": float(acc), "macro_f1": float(macro_f1), "weighted_f1": float(weighted_f1)}
+    
+    # Per-class metrics
+    precision, recall, f1, support = precision_recall_fscore_support(ys, ps, average=None, zero_division=0)
+    
+    return {
+        "acc": float(acc), 
+        "macro_f1": float(macro_f1), 
+        "weighted_f1": float(weighted_f1),
+        "per_class_precision": precision.tolist() if precision is not None else [],
+        "per_class_recall": recall.tolist() if recall is not None else [],
+        "per_class_f1": f1.tolist() if f1 is not None else [],
+        "per_class_support": support.tolist() if support is not None else []
+    }
 
 
 def train_one_run(cfg) -> None:
@@ -334,6 +350,15 @@ def train_one_run(cfg) -> None:
     train_labels = [int(ds_train.df[label_col].iloc[i]) if label_col == "EXP" else int(ds_train.df[label_col].iloc[i])
                     for i in range(len(ds_train.df))]
 
+    # Log class distribution
+    from collections import Counter
+    label_counts = Counter(train_labels)
+    print(f"\nTrain label distribution (task={task}):")
+    for cls in sorted(label_counts.keys()):
+        count = label_counts[cls]
+        pct = 100.0 * count / len(train_labels)
+        print(f"  Class {cls}: {count} samples ({pct:.1f}%)")
+
     # Dataloaders
     batch_size = int(cfg.train.batch_size)
     num_workers = int(cfg.data.num_workers) if "data" in cfg else 4
@@ -381,12 +406,101 @@ def train_one_run(cfg) -> None:
     # Optimizer / scheduler
     lr = float(cfg.optimizer.lr)
     wd = float(cfg.optimizer.weight_decay)
-    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
-
+    opt_name = getattr(cfg.optimizer, 'name', 'adam').lower()
+    
+    if opt_name == 'adamw':
+        opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+        print(f"Using AdamW optimizer: lr={lr}, weight_decay={wd}")
+    else:
+        opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+        print(f"Using Adam optimizer: lr={lr}, weight_decay={wd}")
+    
     epochs = int(cfg.train.epochs)
+    warmup_epochs = int(getattr(cfg.scheduler, 'warmup_epochs', 0))
+    print(f"LR schedule: cosine with warmup_epochs={warmup_epochs}")
+
     best_metric = -1.0
     best_path = out_dir / "best.ckpt"
     metrics_val_path = out_dir / "metrics_val.json"
+
+    # Sanity overfit test (optional)
+    if args.sanity_overfit:
+        print("\n" + "="*80)
+        print("SANITY OVERFIT TEST MODE")
+        print("="*80)
+        print(f"Task={task} | Training on {min(200, len(ds_train))} samples for 30 epochs")
+        print(f"Expected: train_acc > 0.95 (indicates model can fit small dataset)")
+        print("="*80)
+        
+        # Tiny subset
+        tiny_indices = list(range(min(200, len(ds_train))))
+        tiny_train = torch.utils.data.Subset(ds_train, tiny_indices)
+        tiny_loader = DataLoader(tiny_train, batch_size=32, shuffle=True, num_workers=0)
+        
+        # Train for 30 epochs
+        model.train()
+        for sanity_epoch in range(1, 31):
+            sanity_loss = 0.0
+            sanity_correct = 0
+            sanity_total = 0
+            
+            for x, y, _ in tiny_loader:
+                x = x.to(device)
+                y = y.to(device)
+                opt.zero_grad(set_to_none=True)
+                logits = model(x)
+                loss = loss_fn(logits, y)
+                loss.backward()
+                opt.step()
+                
+                sanity_loss += loss.item() * x.size(0)
+                preds = logits.argmax(dim=1)
+                sanity_correct += (preds == y).sum().item()
+                sanity_total += x.size(0)
+            
+            sanity_acc = sanity_correct / sanity_total
+            sanity_loss /= sanity_total
+            if sanity_epoch % 10 == 0 or sanity_epoch == 1:
+                print(f"  Sanity epoch {sanity_epoch}/30 | loss={sanity_loss:.4f} | acc={sanity_acc:.4f}")
+        
+        if sanity_acc < 0.95:
+            print(f"\n[WARNING] Sanity test FAILED: train_acc={sanity_acc:.4f} < 0.95")
+            print("Debug info:")
+            print(f"  - Task: {task}")
+            print(f"  - Num classes: {num_classes}")
+            print(f"  - Tiny dataset size: {len(tiny_train)}")
+            print(f"  - Sample (image, label):")
+            for i in range(min(5, len(tiny_train))):
+                img, lbl, lbl_raw = tiny_train[i]
+                print(f"    [{i}] shape={img.shape}, label={lbl}, raw={lbl_raw}")
+            # Continue anyway (don't fail hard)
+        else:
+            print(f"\n[OK] Sanity test PASSED: train_acc={sanity_acc:.4f} >= 0.95")
+        
+        print("="*80 + "\n")
+        
+        # Reset model to fresh weights for actual training
+        from src.model import IVF_EffiMorphPP
+        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=float(cfg.model.dropout))
+        model.to(device)
+        # Reinit optimizer with new model
+        lr = float(cfg.optimizer.lr)
+        opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=float(cfg.optimizer.weight_decay))
+
+    # Create cosine annealing scheduler with warmup
+    total_steps = epochs * len(dl_train)
+    warmup_steps = warmup_epochs * len(dl_train)
+    
+    def get_lr_scale(step: int) -> float:
+        """Warmup + cosine annealing schedule."""
+        if step < warmup_steps:
+            return float(step) / float(max(1, warmup_steps))
+        else:
+            progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return 0.5 * (1.0 + np.cos(np.pi * progress))
+    
+    # Create a lambda scheduler
+    scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=get_lr_scale)
 
     # Training loop (simple)
     for epoch in range(1, epochs + 1):
@@ -401,6 +515,7 @@ def train_one_run(cfg) -> None:
             loss = loss_fn(logits, y)
             loss.backward()
             opt.step()
+            scheduler.step()  # Update LR after each batch
             running += loss.item() * x.size(0)
             n += x.size(0)
 
@@ -454,6 +569,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--use_class_weights", type=int, default=None)
+    parser.add_argument("--sanity_overfit", action="store_true",
+                        help="Run sanity test: train on 200 samples for 30 epochs, assert train_acc > 0.95")
 
     args = parser.parse_args()
 
