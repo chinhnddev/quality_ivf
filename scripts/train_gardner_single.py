@@ -409,7 +409,7 @@ def train_one_run(cfg) -> None:
         # val
         val_metrics = evaluate_on_val(model, dl_val, device)
         monitor = val_metrics["macro_f1"]  # align with cfg.monitor.metric if you prefer parsing it
-        print(f"Epoch {epoch:03d}/{epochs} | train_loss={train_loss:.4f} | "
+        print(f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f} | "
               f"val_acc={val_metrics['acc']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
               f"val_weighted_f1={val_metrics['weighted_f1']:.4f}")
 
