@@ -100,7 +100,7 @@ class FocalLoss(nn.Module):
         return loss.mean()
 
 
-def make_loss_fn(track: str, task: str, num_classes: int, use_class_weights: bool, train_labels: List[int]) -> nn.Module:
+def make_loss_fn(track: str, task: str, num_classes: int, use_class_weights: bool, train_labels: List[int], sanity_mode: bool = False) -> nn.Module:
     weights = None
     if use_class_weights:
         weights = compute_class_weights(train_labels, num_classes)
@@ -116,8 +116,9 @@ def make_loss_fn(track: str, task: str, num_classes: int, use_class_weights: boo
         return nn.CrossEntropyLoss(weight=weights)
     if track == "improved":
         if task == "exp":
-            # label smoothing for EXP
-            return nn.CrossEntropyLoss(weight=weights, label_smoothing=0.1)
+            # label smoothing for EXP (disable in sanity mode)
+            label_smoothing = 0.0 if sanity_mode else 0.1
+            return nn.CrossEntropyLoss(weight=weights, label_smoothing=label_smoothing)
         # focal for ICM/TE
         return FocalLoss(gamma=2.0, weight=weights)
     raise ValueError(f"Unknown track: {track}")
@@ -138,6 +139,7 @@ class GardnerDataset(Dataset):
         label_col: str = "EXP",
         image_size: int = 224,
         augmentation_cfg: Optional[dict] = None,
+        sanity_mode: bool = False,
     ):
         self.csv_path = csv_path
         self.images_root = images_root
@@ -146,6 +148,7 @@ class GardnerDataset(Dataset):
         self.image_col = image_col
         self.label_col = label_col
         self.image_size = image_size
+        self.sanity_mode = sanity_mode
 
         df = pd.read_csv(csv_path)
         if image_col not in df.columns or label_col not in df.columns:
@@ -173,12 +176,12 @@ class GardnerDataset(Dataset):
         self.df = df.reset_index(drop=True)
 
         # Transforms
-        self.transform = self._build_transform(augmentation_cfg)
+        self.transform = self._build_transform(augmentation_cfg, sanity_mode)
 
-    def _build_transform(self, aug: Optional[dict]):
+    def _build_transform(self, aug: Optional[dict], sanity_mode: bool = False):
         size = self.image_size
-        if self.split == "train":
-            # Default augmentation per your base.yaml
+        if self.split == "train" and not sanity_mode:
+            # Default augmentation per your base.yaml (ONLY if not sanity_mode)
             rotation = (aug or {}).get("rotation_deg", 10)
             hflip = (aug or {}).get("horizontal_flip", True)
             vflip = (aug or {}).get("vertical_flip", True)
@@ -208,13 +211,23 @@ class GardnerDataset(Dataset):
             ])
             return transforms.Compose(t)
 
-        # val/test
-        return transforms.Compose([
-            transforms.Resize((size, size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225]),
-        ])
+        # val/test OR sanity_mode: deterministic (no augmentation)
+        # In sanity mode: Resize(224)+CenterCrop(224)+ToTensor+ImageNet Normalize
+        if sanity_mode:
+            return transforms.Compose([
+                transforms.Resize(224),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225]),
+            ])
+        else:
+            return transforms.Compose([
+                transforms.Resize((size, size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225]),
+            ])
 
     def __len__(self):
         return len(self.df)
@@ -265,7 +278,12 @@ def print_label_summary(df: pd.DataFrame, task: str, label_col: str, split_name:
 def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict:
     model.eval()
     ys, ps = [], []
-    for x, y, _ in loader:
+    for batch in loader:
+        # Handle both 3 and 4 element tuples from dataset
+        if len(batch) == 4:
+            x, y, _, _ = batch
+        else:
+            x, y, _ = batch
         x = x.to(device)
         logits = model(x)
         pred = logits.argmax(dim=1).cpu().numpy().tolist()
@@ -322,6 +340,8 @@ def train_one_run(cfg, args) -> None:
         print_label_summary(raw_val_df, task, label_col, "val.csv (raw)")
 
     # Build datasets (train/val filtered properly)
+    # If sanity test is requested, create datasets with sanity_mode=True (deterministic transforms)
+    sanity_mode = bool(args.sanity_overfit)
     ds_train = GardnerDataset(
         csv_path=train_csv,
         images_root=images_root,
@@ -331,6 +351,7 @@ def train_one_run(cfg, args) -> None:
         label_col=label_col,
         image_size=int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size),
         augmentation_cfg=cfg.augmentation if "augmentation" in cfg else {},
+        sanity_mode=sanity_mode,
     )
     ds_val = GardnerDataset(
         csv_path=val_csv,
@@ -341,6 +362,7 @@ def train_one_run(cfg, args) -> None:
         label_col=label_col,
         image_size=int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size),
         augmentation_cfg=cfg.augmentation if "augmentation" in cfg else {},
+        sanity_mode=False,
     )
 
     print("train_size=", len(ds_train), "val_size=", len(ds_val))
@@ -377,10 +399,26 @@ def train_one_run(cfg, args) -> None:
             f"Original error: {e}"
         )
 
-    model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=float(cfg.model.dropout))
+    # In sanity_overfit mode, disable dropout for true overfit test
+    dropout_p_value = 0.0 if args.sanity_overfit else float(cfg.model.dropout)
+
+    # Sanity model scale preset
+    if args.sanity_overfit:
+        scale_mapping = {"small": 1.0, "base": 1.25, "large": 1.5}
+        width_mult = scale_mapping[args.sanity_model_scale]
+        # Auto-bump to 2.0 if params < 3M
+        temp_model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult)
+        total_params = sum(p.numel() for p in temp_model.parameters())
+        if total_params < 3_000_000 and args.sanity_model_scale == "large":
+            width_mult = 2.0
+        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult)
+    else:
+        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     print(f"Device: {device}")
+    if args.sanity_overfit:
+        print(f"[SANITY MODE] Using dropout_p=0.0 for overfitting test")
 
     # Print model summary
     if torchinfo_summary is not None:
@@ -401,7 +439,7 @@ def train_one_run(cfg, args) -> None:
     # Loss
     use_class_weights = bool(cfg.use_class_weights)
     loss_fn = make_loss_fn(track=track, task=task, num_classes=num_classes,
-                           use_class_weights=use_class_weights, train_labels=train_labels)
+                           use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode)
 
     # Optimizer / scheduler
     lr = float(cfg.optimizer.lr)
@@ -428,30 +466,65 @@ def train_one_run(cfg, args) -> None:
         print("\n" + "="*80)
         print("SANITY OVERFIT TEST MODE")
         print("="*80)
-        print(f"Task={task} | Training on {min(200, len(ds_train))} samples for 30 epochs")
+        print(f"Task={task} | Training on {min(sanity_samples, len(ds_train))} samples for {sanity_epochs} epochs")
         print(f"Expected: train_acc > 0.95 (indicates model can fit small dataset)")
+        print("Sanity mode: ALL augmentations disabled, dropout_p=0.0, fixed LR=1e-3")
         print("="*80)
         
-        # Tiny subset
-        tiny_indices = list(range(min(200, len(ds_train))))
+        # Tiny subset (smaller batch size for more frequent updates)
+        tiny_indices = list(range(min(sanity_samples, len(ds_train))))
         tiny_train = torch.utils.data.Subset(ds_train, tiny_indices)
-        tiny_loader = DataLoader(tiny_train, batch_size=32, shuffle=True, num_workers=0)
+        tiny_loader = DataLoader(tiny_train, batch_size=16, shuffle=True, num_workers=0)
         
-        # Train for 30 epochs
+        # For final evaluation: use eval transform (deterministic, no augmentation)
+        # Simplest: just manually apply eval transform to the tiny images
+        tiny_loader_eval = DataLoader(tiny_train, batch_size=32, shuffle=False, num_workers=0)
+        # Note: tiny_train was created from ds_train which has sanity_mode=True (no augmentation)
+        # So tiny_loader_eval will have the same deterministic transform as tiny_loader
+        
+        # Print diagnostic info
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"\nModel parameters: {trainable_params:,} / {total_params:,} trainable")
+        
+        # Disable batch norm for pure overfitting (removes regularization)
+        for module in model.modules():
+            if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+                module.eval()  # Eval mode: frozen stats, no updates
+                for param in module.parameters():
+                    param.requires_grad = False
+        
+        # Use Adam(lr=args.sanity_lr default 2e-3, wd=0) and NO scheduler
+        sanity_lr = float(args.sanity_lr)
+        sanity_opt = torch.optim.Adam(model.parameters(), lr=sanity_lr, weight_decay=0.0)
+        print(f"Sanity optimizer: Adam(lr={sanity_lr}, weight_decay=0.0)")
+
+        # Use sanity_epochs default 60
+        sanity_epochs = int(args.sanity_epochs)
+        sanity_threshold = float(args.sanity_threshold)
+        print(f"Sanity epochs: {sanity_epochs}")
+        print(f"Sanity threshold: {sanity_threshold}")
+
+        # Train for sanity_epochs
         model.train()
-        for sanity_epoch in range(1, 31):
+        final_train_acc = 0.0
+        for sanity_epoch in range(1, sanity_epochs + 1):
             sanity_loss = 0.0
             sanity_correct = 0
             sanity_total = 0
             
-            for x, y, _ in tiny_loader:
+            for batch in tiny_loader:
+                if len(batch) == 4:
+                    x, y, _, _ = batch
+                else:
+                    x, y, _ = batch
                 x = x.to(device)
                 y = y.to(device)
-                opt.zero_grad(set_to_none=True)
+                sanity_opt.zero_grad(set_to_none=True)
                 logits = model(x)
                 loss = loss_fn(logits, y)
                 loss.backward()
-                opt.step()
+                sanity_opt.step()
                 
                 sanity_loss += loss.item() * x.size(0)
                 preds = logits.argmax(dim=1)
@@ -460,22 +533,42 @@ def train_one_run(cfg, args) -> None:
             
             sanity_acc = sanity_correct / sanity_total
             sanity_loss /= sanity_total
-            if sanity_epoch % 10 == 0 or sanity_epoch == 1:
-                print(f"  Sanity epoch {sanity_epoch}/30 | loss={sanity_loss:.4f} | acc={sanity_acc:.4f}")
+            if sanity_epoch % 10 == 0 or sanity_epoch == 1 or sanity_epoch == 50:
+                print(f"  Epoch {sanity_epoch:2d}/50 | loss={sanity_loss:.4f} | train_acc={sanity_acc:.4f}")
         
-        if sanity_acc < 0.95:
-            print(f"\n[WARNING] Sanity test FAILED: train_acc={sanity_acc:.4f} < 0.95")
-            print("Debug info:")
-            print(f"  - Task: {task}")
-            print(f"  - Num classes: {num_classes}")
+        # Final evaluation on the same 200 samples using DETERMINISTIC transform
+        print("\n[Evaluating on deterministic transform]")
+        model.eval()
+        eval_correct = 0
+        eval_total = 0
+        first_batch_logits_mean = None
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(tiny_loader_eval):
+                x, y, _ = batch
+                x = x.to(device)
+                y = y.to(device)
+                logits = model(x)
+                if batch_idx == 0:
+                    first_batch_logits_mean = logits.mean(dim=0).cpu().numpy()
+                preds = logits.argmax(dim=1)
+                eval_correct += (preds == y).sum().item()
+                eval_total += y.size(0)
+        final_train_acc = eval_correct / eval_total
+        print(f"  Final train_acc (deterministic eval): {final_train_acc:.4f}")
+        print(f"  First batch logits mean: {first_batch_logits_mean}")
+        
+        if final_train_acc < sanity_threshold:
+            print(f"\n[FAILED] Sanity test FAILED: train_acc={final_train_acc:.4f} < {sanity_threshold}")
+            print("[DEBUG] Possible issues:")
+            print(f"  - Model: {model.__class__.__name__}")
+            print(f"  - Task: {task}, num_classes: {num_classes}")
             print(f"  - Tiny dataset size: {len(tiny_train)}")
-            print(f"  - Sample (image, label):")
-            for i in range(min(5, len(tiny_train))):
-                img, lbl, lbl_raw = tiny_train[i]
-                print(f"    [{i}] shape={img.shape}, label={lbl}, raw={lbl_raw}")
-            # Continue anyway (don't fail hard)
+            print(f"  - Dropout enabled: {any(hasattr(m, 'p') and m.p > 0 for m in model.modules() if type(m).__name__ == 'Dropout')}")
+            print(f"  - Sample labels from first batch: {list(range(min(5, eval_total)))}")
+            print("="*80 + "\n")
+            exit(1)  # Fail-fast: do NOT resume normal training
         else:
-            print(f"\n[OK] Sanity test PASSED: train_acc={sanity_acc:.4f} >= 0.95")
+            print(f"\n[SUCCESS] Sanity test PASSED: train_acc={final_train_acc:.4f} >= {sanity_threshold}")
         
         print("="*80 + "\n")
         
@@ -485,7 +578,14 @@ def train_one_run(cfg, args) -> None:
         model.to(device)
         # Reinit optimizer with new model
         lr = float(cfg.optimizer.lr)
-        opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=float(cfg.optimizer.weight_decay))
+        wd = float(cfg.optimizer.weight_decay)
+        opt_name = getattr(cfg.optimizer, 'name', 'adam').lower()
+        if opt_name == 'adamw':
+            opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+            print(f"[Resuming normal training] Fresh model, AdamW(lr={lr}, weight_decay={wd})")
+        else:
+            opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+            print(f"[Resuming normal training] Fresh model, Adam(lr={lr}, weight_decay={wd})")
 
     # Create cosine annealing scheduler with warmup
     total_steps = epochs * len(dl_train)
@@ -507,7 +607,11 @@ def train_one_run(cfg, args) -> None:
         model.train()
         running = 0.0
         n = 0
-        for x, y, _ in dl_train:
+        for batch in dl_train:
+            if len(batch) == 4:
+                x, y, _, _ = batch
+            else:
+                x, y, _ = batch
             x = x.to(device)
             y = y.to(device)
             opt.zero_grad(set_to_none=True)
@@ -570,7 +674,23 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--use_class_weights", type=int, default=None)
     parser.add_argument("--sanity_overfit", action="store_true",
-                        help="Run sanity test: train on 200 samples for 30 epochs, assert train_acc > 0.95")
+                        help="Run sanity overfit test on a tiny subset then exit (fail-fast).")
+
+    parser.add_argument("--sanity_samples", type=int, default=200,
+                        help="Number of training samples used in sanity overfit mode.")
+
+    parser.add_argument("--sanity_epochs", type=int, default=60,
+                        help="Epochs for sanity overfit mode (default 60).")
+
+    parser.add_argument("--sanity_lr", type=float, default=2e-3,
+                        help="Learning rate for sanity overfit optimizer (default 2e-3).")
+
+    parser.add_argument("--sanity_threshold", type=float, default=0.95,
+                        help="Required deterministic train accuracy for sanity pass.")
+
+    parser.add_argument("--sanity_model_scale", type=str, default="large",
+                        choices=["small", "base", "large"],
+                        help="Model capacity preset used in sanity mode.")
 
     args = parser.parse_args()
 

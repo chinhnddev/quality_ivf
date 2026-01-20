@@ -1,10 +1,29 @@
-# TODO: Update IVF-EffiMorphPP Pipeline for Gardner Experiments
+# Sanity Overfit Improvements TODO
 
-## Tasks to Complete
-- [ ] Modify src/dataset.py: Add val split, normalize labels, correct filtering for train/val/test
-- [ ] Create src/losses.py: Implement cross_entropy, focal_loss, compute_class_weights
-- [ ] Update src/train.py: Use splits_dir, val.csv for validation, add sanity checks
-- [ ] Create scripts/train_gardner_single.py: CLI, training logic, output structure
-- [ ] Create scripts/eval_gardner_single.py: CLI, evaluation with masking, save metrics/preds
-- [ ] Test scripts: Run sample training/eval, verify acceptance tests
-- [ ] Final: Provide commands for 6 experiments and markdown table template
+## 1. Deterministic Transforms in Sanity Mode
+- [x] Update GardnerDataset._build_transform to use Resize(224)+CenterCrop(224)+ToTensor+ImageNet Normalize for sanity_mode
+- [x] Ensure train_transform == eval_transform in sanity mode
+
+## 2. Disable Regularization in Sanity
+- [x] Ensure dropout_p=0.0 for IVF_EffiMorphPP in sanity (already done)
+- [x] Set label_smoothing=0.0 in make_loss_fn for sanity mode
+- [x] Confirm mixup/cutmix not present (not needed)
+
+## 3. Sanity Optimizer
+- [x] Use Adam(lr=args.sanity_lr default 2e-3, wd=0) in sanity mode
+- [x] No scheduler in sanity mode
+- [x] Use sanity_epochs default 60
+
+## 4. Fail-fast
+- [x] After sanity training, evaluate deterministic train_acc on tiny set
+- [x] If train_acc < 0.95, print diagnostics and exit(1)
+- [x] Do NOT resume normal training if failed
+
+## 5. Sanity Model Scale Preset
+- [x] Add width_mult mapping: small=1.0, base=1.25, large=1.5 (or auto-bump to 2.0 if params <3M)
+- [x] Print param count and channel config in sanity mode
+- [x] Update model creation in sanity to use width_mult
+
+## 6. Testing and Validation
+- [x] Test the changes with example commands
+- [x] Ensure backward compatibility

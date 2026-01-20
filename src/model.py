@@ -67,58 +67,101 @@ class DWConvBlock(nn.Module):
 
 
 class IVF_EffiMorphPP(nn.Module):
-    def __init__(self, num_classes, dropout_p=0.3):
-        super(IVF_EffiMorphPP, self).__init__()
+    """
+    Scalable IVF_EffiMorphPP.
+
+    Scaling rule:
+      base = make_divisible(base_channels * width_mult)
+      stage1_out = 2*base
+      stage2_out = 4*base
+      stage3_out = 8*base
+      stage4_out = 16*base
+
+    Default (base_channels=32, width_mult=1.0) reproduces original channels:
+      stem=32, s1=64, s2=128, s3=256, s4=512
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        dropout_p: float = 0.3,
+        width_mult: float = 1.0,
+        base_channels: int = 32,
+        divisor: int = 8,
+        eca_k: int = 5,
+    ):
+        super().__init__()
+
+        def make_divisible(v: float, div: int = 8, min_value: int | None = None) -> int:
+            if min_value is None:
+                min_value = div
+            new_v = max(min_value, int(v + div / 2) // div * div)
+            # ensure we don't round down by more than 10%
+            if new_v < 0.9 * v:
+                new_v += div
+            return int(new_v)
+
+        # Compute scaled channels
+        base = make_divisible(base_channels * width_mult, divisor)
+        c_stem = base
+        c1 = make_divisible(2 * base, divisor)   # stage1 out
+        c2 = make_divisible(4 * base, divisor)   # stage2 out
+        c3 = make_divisible(8 * base, divisor)   # stage3 out
+        c4 = make_divisible(16 * base, divisor)  # stage4 out
+
+        self._channels = {"stem": c_stem, "s1": c1, "s2": c2, "s3": c3, "s4": c4}
+
         # Stem
-        self.stem = nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1)
+        self.stem = nn.Conv2d(3, c_stem, kernel_size=3, stride=2, padding=1)
 
-        # Stage 1: Multi-scale @112x112 -> 56x56, 64ch
-        self.stage1 = MultiScaleBlock(32, 64)
-        self.stage1_down = nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1)
+        # Stage 1: Multi-scale @112x112 -> 56x56
+        self.stage1 = MultiScaleBlock(c_stem, c1)
+        self.stage1_down = nn.Conv2d(c1, c1, kernel_size=3, stride=2, padding=1)
 
-        # Stage 2: DW+PW @56x56 -> 28x28, 128ch
-        self.stage2 = DWConvBlock(64, 128, stride=2)
+        # Stage 2: DW+PW @56x56 -> 28x28
+        self.stage2 = DWConvBlock(c1, c2, stride=2)
 
-        # Stage 3: DW+PW with dilation @28x28 -> 14x14, 256ch
-        self.stage3 = DWConvBlock(128, 256, stride=2, dilation=2)
+        # Stage 3: DW+PW with dilation @28x28 -> 14x14
+        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=2)
 
-        # Stage 4: DW+PW @14x14 -> 7x7, 512ch
-        self.stage4 = DWConvBlock(256, 512, stride=2)
+        # Stage 4: DW+PW @14x14 -> 7x7
+        self.stage4 = DWConvBlock(c3, c4, stride=2)
 
-        # Multi-scale fusion
-        self.fusion_conv2 = nn.Conv2d(128, 512, kernel_size=1)
-        self.fusion_conv3 = nn.Conv2d(256, 512, kernel_size=1)
-        self.fusion_conv4 = nn.Conv2d(512, 512, kernel_size=1)
+        # Multi-scale fusion (project s2/s3/s4 -> c4 then gated sum)
+        self.fusion_conv2 = nn.Conv2d(c2, c4, kernel_size=1)
+        self.fusion_conv3 = nn.Conv2d(c3, c4, kernel_size=1)
+        self.fusion_conv4 = nn.Conv2d(c4, c4, kernel_size=1)
         self.gates = nn.Parameter(torch.ones(3))  # alpha, beta, gamma
 
-        self.eca = ECA(512, k_size=5)
+        self.eca = ECA(c4, k_size=eca_k)
 
         # Head
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout(dropout_p)
-        self.fc1 = nn.Linear(512, 256)
-        self.fc2 = nn.Linear(256, num_classes)
+        self.fc1 = nn.Linear(c4, max(128, c4 // 2))
+        self.fc2 = nn.Linear(max(128, c4 // 2), num_classes)
 
     def forward(self, x):
         # Stem
-        x = self.stem(x)  # 112x112, 32
+        x = self.stem(x)  # 112x112
 
         # Stage 1
-        x = self.stage1(x)  # 112x112, 64
-        x = self.stage1_down(x)  # 56x56, 64
+        x = self.stage1(x)        # 112x112
+        x = self.stage1_down(x)   # 56x56
 
         # Stage 2
-        s2 = self.stage2(x)  # 28x28, 128
+        s2 = self.stage2(x)       # 28x28
 
         # Stage 3
-        s3 = self.stage3(s2)  # 14x14, 256
+        s3 = self.stage3(s2)      # 14x14
 
         # Stage 4
-        s4 = self.stage4(s3)  # 7x7, 512
+        s4 = self.stage4(s3)      # 7x7
 
         # Fusion
-        s2_up = F.interpolate(s2, size=(7, 7), mode='bilinear', align_corners=False)
-        s3_up = F.interpolate(s3, size=(7, 7), mode='bilinear', align_corners=False)
+        s2_up = F.interpolate(s2, size=(7, 7), mode="bilinear", align_corners=False)
+        s3_up = F.interpolate(s3, size=(7, 7), mode="bilinear", align_corners=False)
+
         s2_f = self.fusion_conv2(s2_up)
         s3_f = self.fusion_conv3(s3_up)
         s4_f = self.fusion_conv4(s4)
@@ -129,8 +172,13 @@ class IVF_EffiMorphPP(nn.Module):
         fused = self.eca(fused)
 
         # Head
-        x = self.gap(fused).view(fused.size(0), -1)
+        x = self.gap(fused).flatten(1)
         x = self.dropout(x)
-        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc1(x), inplace=True)
         x = self.fc2(x)
         return x
+
+    def count_params(self):
+        total = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return total, trainable, dict(self._channels)
