@@ -350,6 +350,7 @@ def train_one_run(cfg) -> None:
     model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=float(cfg.model.dropout))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
+    print(f"Device: {device}")
 
     # Loss
     use_class_weights = bool(cfg.use_class_weights)
