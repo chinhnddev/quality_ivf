@@ -466,13 +466,13 @@ def train_one_run(cfg, args) -> None:
         print("\n" + "="*80)
         print("SANITY OVERFIT TEST MODE")
         print("="*80)
-        print(f"Task={task} | Training on {min(sanity_samples, len(ds_train))} samples for {sanity_epochs} epochs")
+        print(f"Task={task} | Training on {min(args.sanity_samples, len(ds_train))} samples for {args.sanity_epochs} epochs")
         print(f"Expected: train_acc > 0.95 (indicates model can fit small dataset)")
         print("Sanity mode: ALL augmentations disabled, dropout_p=0.0, fixed LR=1e-3")
         print("="*80)
         
         # Tiny subset (smaller batch size for more frequent updates)
-        tiny_indices = list(range(min(sanity_samples, len(ds_train))))
+        tiny_indices = list(range(min(args.sanity_samples, len(ds_train))))
         tiny_train = torch.utils.data.Subset(ds_train, tiny_indices)
         tiny_loader = DataLoader(tiny_train, batch_size=16, shuffle=True, num_workers=0)
         
