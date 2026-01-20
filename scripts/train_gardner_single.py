@@ -289,7 +289,7 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device) 
     }
 
 
-def train_one_run(cfg) -> None:
+def train_one_run(cfg, args) -> None:
     task = cfg.task
     track = cfg.track
     splits_dir = Path(cfg.splits_dir)
@@ -600,7 +600,7 @@ def main():
     print(f"Task={cfg.task} | Track={cfg.track}")
     print(f"Splits dir={cfg.splits_dir} | Out dir={cfg.out_dir}")
 
-    train_one_run(cfg)
+    train_one_run(cfg, args)
 
 
 if __name__ == "__main__":
