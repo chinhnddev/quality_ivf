@@ -19,7 +19,7 @@ data:
   icm_col: ICM
   te_col: TE
   image_size: 224
-  num_workers: 4
+  num_workers: 2
 
 # Training
 train:
