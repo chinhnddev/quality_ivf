@@ -1,0 +1,6 @@
+# Improved track config
+track: improved
+loss_name: conditional  # cross_entropy for exp, focal for icm/te
+label_smoothing: 0.1  # for exp
+focal_gamma: 2.0  # for icm/te
+compute_class_weights_from_train: true

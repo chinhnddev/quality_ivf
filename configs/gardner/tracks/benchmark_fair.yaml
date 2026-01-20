@@ -1,0 +1,39 @@
+# Benchmark-fair training configuration
+# Purpose:
+# - Ensure fair comparison across tasks (EXP / ICM / TE)
+# - Use the SAME loss family (CrossEntropy) for all tasks
+# - No task-specific tricks (no focal, no label smoothing)
+
+track: benchmark_fair
+
+# Loss configuration
+loss:
+  name: cross_entropy          # unified loss for all tasks
+  label_smoothing: 0.0         # IMPORTANT: no label smoothing
+  focal_gamma: null            # not used in benchmark_fair
+
+# Class weighting
+# - If enabled, weights MUST be computed from TRAIN split only
+# - For ICM/TE: only over valid labels {0,1,2} after filtering
+# - For EXP: over labels {0,1,2,3,4}
+use_class_weights: false       # set true ONLY if you explicitly want weighted CE
+
+# Optimization behavior (track-specific override if needed)
+optimizer:
+  name: adam
+  lr: 5.0e-4
+  weight_decay: 0.0
+
+scheduler:
+  name: cosine
+  warmup_epochs: 0             # keep 0 for strict benchmark fairness
+
+# Early stopping / model selection
+monitor:
+  metric: val_macro_f1         # same metric across all tasks
+  mode: max
+  patience: 10
+
+# Logging / bookkeeping
+save_best_only: true
+log_confusion_matrix: true

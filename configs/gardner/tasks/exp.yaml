@@ -1,0 +1,6 @@
+# EXP task config
+task: exp
+num_classes: 5
+label_col: EXP
+label_valid_set: [0,1,2,3,4]
+masking: none

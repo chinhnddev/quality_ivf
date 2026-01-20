@@ -1,0 +1,6 @@
+# ICM task config
+task: icm
+num_classes: 3
+label_col: ICM
+label_valid_set: [0,1,2]
+masking: mask_invalid
