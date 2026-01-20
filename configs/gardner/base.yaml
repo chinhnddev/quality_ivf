@@ -31,7 +31,7 @@ train:
 # Optimization (default; can be overridden by track config)
 optimizer:
   name: adamw
-  lr: 1.0e-4
+  lr: 3.0e-4
   weight_decay: 1.0e-4
 
 scheduler:
