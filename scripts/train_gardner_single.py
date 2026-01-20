@@ -19,6 +19,11 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from PIL import Image
 
+try:
+    from torchinfo import summary as torchinfo_summary
+except ImportError:
+    torchinfo_summary = None
+
 # Add parent directory to path to import src module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -351,6 +356,22 @@ def train_one_run(cfg) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     print(f"Device: {device}")
+
+    # Print model summary
+    if torchinfo_summary is not None:
+        print("\n" + "="*80)
+        print("Model Summary")
+        print("="*80)
+        try:
+            torchinfo_summary(model, input_size=(1, 3, 224, 224), device=device, verbose=0)
+        except Exception as e:
+            print(f"Could not print model summary: {e}")
+        print("="*80 + "\n")
+    else:
+        # Fallback: simple parameter count
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Total params: {total_params:,} | Trainable params: {trainable_params:,}")
 
     # Loss
     use_class_weights = bool(cfg.use_class_weights)
