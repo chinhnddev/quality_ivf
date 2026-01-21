@@ -407,11 +407,16 @@ def train_one_run(cfg, args) -> None:
     sampler = None
 
     if use_weighted_sampler:
-        # Build sample weights from train labels
-        sample_weights = [1.0 / label_counts[label] for label in train_labels]
+        alpha = float(getattr(cfg.train, "sampler_alpha", 0.5))  # default 0.5
+
+        sample_weights = []
+        for y in train_labels:
+            c = label_counts[int(y)]
+            w = (1.0 / c) ** alpha
+            sample_weights.append(w)
 
         sampler = WeightedRandomSampler(
-            weights=sample_weights,
+            weights=torch.tensor(sample_weights, dtype=torch.double),
             num_samples=len(sample_weights),
             replacement=True
         )
