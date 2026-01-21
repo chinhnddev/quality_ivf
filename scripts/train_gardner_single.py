@@ -528,20 +528,39 @@ def train_one_run(cfg, args) -> None:
     dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=(device.type == "cuda"))
 
     # Print model summary
+    print("\n" + "="*80)
+    print("Model Summary")
+    print("="*80)
+    
+    # Always show parameter count
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total params: {total_params:,} | Trainable params: {trainable_params:,}")
+    
+    # Try to compute FLOPs
+    try:
+        from fvcore.nn import FlopCounterMode
+        with FlopCounterMode(model) as fcm:
+            dummy_input = torch.randn(1, 3, 224, 224).to(device)
+            _ = model(dummy_input)
+        flops = fcm.flop_counts.get("Global", 0)
+        print(f"FLOPs (per sample): {flops:,}")
+    except ImportError:
+        # Estimate FLOPs: roughly 2 * params for inference
+        flops_estimate = total_params * 2
+        print(f"FLOPs (estimated): {flops_estimate:,}")
+    except Exception as e:
+        pass
+    
+    # Try torchinfo if available
     if torchinfo_summary is not None:
-        print("\n" + "="*80)
-        print("Model Summary")
-        print("="*80)
         try:
+            print("\nDetailed summary:")
             torchinfo_summary(model, input_size=(1, 3, 224, 224), device=device, verbose=0)
         except Exception as e:
-            print(f"Could not print model summary: {e}")
-        print("="*80 + "\n")
-    else:
-        # Fallback: simple parameter count
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Total params: {total_params:,} | Trainable params: {trainable_params:,}")
+            pass
+    
+    print("="*80 + "\n")
 
     # Loss
     use_class_weights = bool(cfg.use_class_weights)
