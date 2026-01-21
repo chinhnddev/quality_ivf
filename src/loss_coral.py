@@ -59,23 +59,39 @@ def coral_loss(logits: torch.Tensor, y: torch.Tensor, num_classes: int, reductio
         raise ValueError(f"Unknown reduction: {reduction}")
 
 
-def coral_predict_class(logits: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+def coral_predict_class(logits: torch.Tensor, thresholds = 0.5) -> torch.Tensor:
     """
-    Decode CORAL logits to class predictions.
+    Decode CORAL logits to class predictions with per-threshold support.
 
     Args:
-        logits: (B, K-1) CORAL logits
-        threshold: decision threshold (default 0.5)
+        logits: (B, K-1) CORAL logits for K-1 thresholds
+        thresholds: scalar (float) applied to all K-1 logits, or list of K-1 thresholds
+                   (default: 0.5)
 
     Returns:
-        y_pred: (B,) predicted class labels
+        y_pred: (B,) predicted class labels in [0, K-1]
     """
     # Convert logits to probabilities
     probs = torch.sigmoid(logits)  # (B, K-1)
 
+    # Handle thresholds: scalar or list
+    if isinstance(thresholds, (int, float)):
+        # Scalar: broadcast to all K-1 thresholds
+        exceeds = (probs > thresholds).float()
+    else:
+        # List/tensor of thresholds
+        thresholds_tensor = torch.as_tensor(thresholds, device=logits.device, dtype=logits.dtype)
+        if thresholds_tensor.dim() == 0:
+            # Scalar tensor -> broadcast
+            exceeds = (probs > thresholds_tensor).float()
+        else:
+            # 1D tensor of length K-1
+            assert thresholds_tensor.shape[0] == logits.shape[1], \
+                f"thresholds length ({thresholds_tensor.shape[0]}) must match logits dim 1 ({logits.shape[1]})"
+            exceeds = (probs > thresholds_tensor.unsqueeze(0)).float()
+
     # Count how many thresholds are exceeded
-    # y_pred = sum over k where prob_k > threshold
-    exceeds = (probs > threshold).float()
+    # y_pred = sum over k where prob_k > threshold_k
     y_pred = exceeds.sum(dim=1).long()
 
     return y_pred

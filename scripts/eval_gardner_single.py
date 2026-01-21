@@ -135,6 +135,8 @@ def main():
                         help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
     parser.add_argument("--coral_thr", type=float, default=0.5,
                         help="Decision threshold for CORAL ordinal regression (default: 0.5)")
+    parser.add_argument("--coral_thr_last", type=float, default=None,
+                        help="Override threshold for the last CORAL logit (default: None, use coral_thr for all)")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -183,6 +185,14 @@ def main():
             dummy_output = model(dummy_input)
             assert dummy_output.shape[1] == 4, f"Expected 4 CORAL logits for EXP, got {dummy_output.shape[1]}"
         print(f"[CORAL] Model outputs {dummy_output.shape[1]} logits for EXP ordinal regression")
+        
+        # Prepare threshold list for decoding
+        if args.coral_thr_last is not None:
+            coral_thresholds = [args.coral_thr, args.coral_thr, args.coral_thr, args.coral_thr_last]
+            print(f"[CORAL] Using per-threshold decoding: {coral_thresholds}")
+        else:
+            coral_thresholds = args.coral_thr
+            print(f"[CORAL] Using uniform threshold: {coral_thresholds}")
 
     # Predict
     all_preds: List[int] = []
@@ -204,7 +214,7 @@ def main():
             images = images.to(device, non_blocking=True)
             outputs = model(images)
             if args.use_coral and args.task == "exp":
-                preds = coral_predict_class(outputs, threshold=args.coral_thr)
+                preds = coral_predict_class(outputs, thresholds=coral_thresholds)
                 probs = torch.sigmoid(outputs)  # For CORAL, use sigmoid for probabilities
             else:
                 probs = torch.softmax(outputs, dim=1)
@@ -325,6 +335,13 @@ def main():
         "confusion_matrix": cm.tolist(),
         "y_pred_distribution": {"counts": counts_full, "ratios": ratios_full},
     }
+    
+    # Add CORAL threshold info if applicable
+    if args.use_coral and args.task == "exp":
+        if isinstance(coral_thresholds, list):
+            metrics["coral_thresholds"] = coral_thresholds
+        else:
+            metrics["coral_threshold"] = float(coral_thresholds)
 
     with open(metrics_file, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
