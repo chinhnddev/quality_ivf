@@ -180,60 +180,61 @@ class GardnerDataset(Dataset):
 
         # Transforms
         self.transform = self._build_transform(augmentation_cfg, sanity_mode)
-
+        
     def _build_transform(self, aug: Optional[dict], sanity_mode: bool = False):
         size = self.image_size
         if self.split == "train" and not sanity_mode:
-            # Enhanced augmentation for IVF morphology (symmetric embryos)
-            rotation = (aug or {}).get("rotation_deg", 180)  # Tăng lên 180°
+            # Enhanced & safe augmentation
+            rotation = (aug or {}).get("rotation_deg", 180)  # Tăng lên 180 cho embryo symmetric
             hflip = (aug or {}).get("horizontal_flip", True)
             vflip = (aug or {}).get("vertical_flip", True)
             rrc = (aug or {}).get("random_resized_crop", True)
-            color_jitter = (aug or {}).get("color_jitter", True)  # Bật default
-            affine = (aug or {}).get("affine", True)  # New: shear/scale
-            erasing = (aug or {}).get("erasing", True)  # New: simulate noise
+            color_jitter = (aug or {}).get("color_jitter", True)
 
-            t: List[transforms.Transform] = []
+            t = []
+
+            # Geometric transforms (PIL Image OK)
             if rrc:
                 t.append(transforms.RandomResizedCrop(size, scale=(0.8, 1.2)))
             else:
                 t.append(transforms.Resize((size, size)))
+
             if rotation and rotation > 0:
                 t.append(transforms.RandomRotation(degrees=rotation))
-            if affine:
-                t.append(transforms.RandomAffine(degrees=0, shear=15, scale=(0.8, 1.2)))  # Add shear/scale
+
             if hflip:
                 t.append(transforms.RandomHorizontalFlip())
             if vflip:
                 t.append(transforms.RandomVerticalFlip())
+
+            # Convert to tensor BEFORE color jitter & normalize (an toàn nhất)
+            t.append(transforms.ToTensor())
+
+            # Now tensor-safe transforms
             if color_jitter:
-                t.append(transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.05, hue=0.05))  # Tăng nhẹ
+                t.append(transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.05, hue=0.05))
 
-            if erasing:
-                t.append(transforms.RandomErasing(p=0.3, scale=(0.02, 0.2), ratio=(0.3, 3.3)))  # Add erasing
+            # Normalize (paper-style ImageNet)
+            t.append(transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225]))
 
-            t.extend([
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ])
             return transforms.Compose(t)
 
-        # val/test OR sanity_mode: deterministic (no augmentation)
-        # In sanity mode: Resize(224)+CenterCrop(224)+ToTensor+ImageNet Normalize
+        # val/test/sanity: deterministic
         if sanity_mode:
             return transforms.Compose([
                 transforms.Resize(224),
                 transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225]),
+                                    std=[0.229, 0.224, 0.225]),
             ])
         else:
             return transforms.Compose([
                 transforms.Resize((size, size)),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225]),
+                                    std=[0.229, 0.224, 0.225]),
             ])
 
     def __len__(self):
