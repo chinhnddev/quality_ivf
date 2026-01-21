@@ -166,7 +166,7 @@ def main():
 
     # Model
     num_classes = 5 if args.task == "exp" else 3
-    model = IVF_EffiMorphPP(num_classes).to(device)
+    model = IVF_EffiMorphPP(num_classes, task=args.task, use_coral=bool(args.use_coral)).to(device)
 
     state = load_state_dict_robust(args.checkpoint, device)
     strict = not args.no_strict
