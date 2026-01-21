@@ -292,18 +292,25 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device) 
     acc = accuracy_score(ys, ps) if len(ys) else 0.0
     macro_f1 = f1_score(ys, ps, average="macro") if len(ys) else 0.0
     weighted_f1 = f1_score(ys, ps, average="weighted") if len(ys) else 0.0
-    
+
     # Per-class metrics
     precision, recall, f1, support = precision_recall_fscore_support(ys, ps, average=None, zero_division=0)
-    
+
+    # y_pred distribution
+    from collections import Counter
+    y_pred_counts = Counter(ps)
+    y_pred_ratios = {cls: count / len(ps) for cls, count in y_pred_counts.items()}
+
     return {
-        "acc": float(acc), 
-        "macro_f1": float(macro_f1), 
+        "acc": float(acc),
+        "macro_f1": float(macro_f1),
         "weighted_f1": float(weighted_f1),
         "per_class_precision": precision.tolist() if precision is not None else [],
         "per_class_recall": recall.tolist() if recall is not None else [],
         "per_class_f1": f1.tolist() if f1 is not None else [],
-        "per_class_support": support.tolist() if support is not None else []
+        "per_class_support": support.tolist() if support is not None else [],
+        "y_pred_counts": dict(sorted(y_pred_counts.items())),
+        "y_pred_ratios": dict(sorted(y_pred_ratios.items()))
     }
 
 
@@ -381,10 +388,36 @@ def train_one_run(cfg, args) -> None:
         pct = 100.0 * count / len(train_labels)
         print(f"  Class {cls}: {count} samples ({pct:.1f}%)")
 
+    # Startup diagnostics
+    print(f"\n[STARTUP DIAGNOSTICS] task={task}, num_classes={num_classes}")
+    print(f"  train_size={len(ds_train)}, val_size={len(ds_val)}")
+    print(f"  track={track}, loss_name={'CrossEntropyLoss' if task == 'exp' else 'FocalLoss'}")
+    print(f"  use_class_weights={use_class_weights}, compute_class_weights_from_train={bool(cfg.compute_class_weights_from_train) if hasattr(cfg, 'compute_class_weights_from_train') else False}")
+    if task == "exp":
+        print(f"  label_smoothing={0.0 if sanity_mode else 0.1}")
+    else:
+        print(f"  focal_gamma=2.0")
+
     # Dataloaders
     batch_size = int(cfg.train.batch_size)
     num_workers = int(cfg.data.num_workers) if "data" in cfg else 4
-    dl_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    use_weighted_sampler = bool(getattr(cfg.data, 'use_weighted_sampler', False))
+
+    if use_weighted_sampler:
+        # Build WeightedRandomSampler from train labels
+        from torch.utils.data import WeightedRandomSampler
+        sample_weights = []
+        for label in train_labels:
+            # Use inverse frequency weights
+            weight = 1.0 / label_counts[label]
+            sample_weights.append(weight)
+        sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
+        dl_train = DataLoader(ds_train, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True)
+        print(f"Using WeightedRandomSampler with {len(sample_weights)} samples")
+        print(f"Sample weights (first 5): {sample_weights[:5]}")
+    else:
+        dl_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+
     dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
     # Model import (EDIT THIS LINE to match your repo)
@@ -643,8 +676,28 @@ def train_one_run(cfg, args) -> None:
                 json.dump({"best_epoch": epoch, "best_val": val_metrics}, f, indent=2)
             print(f"  ✓ Saved best to {best_path} (monitor={best_metric:.4f})")
 
+    # Write debug report
+    debug_report_path = out_dir / "debug_report.txt"
+    with open(debug_report_path, "w") as f:
+        f.write(f"Best epoch: {best_metric}\n")
+        f.write(f"Best val_macro_f1: {best_metric:.4f}\n")
+        f.write(f"y_pred distribution at best epoch: {val_metrics['y_pred_counts']}\n")
+        f.write(f"Confusion matrix at best epoch: {val_metrics.get('confusion_matrix', 'N/A')}\n")
+        f.write(f"Class weights applied: {use_class_weights}\n")
+        if use_class_weights:
+            weights = compute_class_weights(train_labels, num_classes)
+            f.write(f"Class weights tensor: {weights.tolist()}\n")
+        f.write(f"WeightedRandomSampler used: False\n")  # TODO: update when implemented
+        f.write(f"Current LR value: {opt.param_groups[0]['lr']:.6f}\n")
+
+        # Check for majority-class collapse
+        max_ratio = max(val_metrics['y_pred_ratios'].values())
+        if max_ratio > 0.8:
+            f.write("Likely majority-class collapse due to imbalance. Recommend enabling WeightedRandomSampler or stronger class reweighting; reduce label_smoothing; reduce warmup.\n")
+
     print(f"\nDone. Best val macro_f1 = {best_metric:.4f}")
     print(f"Artifacts: {out_dir}")
+    print(f"Debug report: {debug_report_path}")
 
 
 # =========================

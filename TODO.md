@@ -1,29 +1,31 @@
-# Sanity Overfit Improvements TODO
+# TODO: Fix Evaluation and Training Diagnostics for Gardner EXP
 
-## 1. Deterministic Transforms in Sanity Mode
-- [x] Update GardnerDataset._build_transform to use Resize(224)+CenterCrop(224)+ToTensor+ImageNet Normalize for sanity_mode
-- [x] Ensure train_transform == eval_transform in sanity mode
+## 1. Fix Eval Output (scripts/eval_gardner_single.py)
+- [x] Add --split flag (default 'test')
+- [x] Ensure out_dir creation and save metrics_<split>.json, preds_<split>.csv
+- [x] Print absolute paths after saving
+- [x] Add defensive checks for checkpoint and csv existence
+- [x] Handle dataset length mismatch by returning image_name from dataset
 
-## 2. Disable Regularization in Sanity
-- [x] Ensure dropout_p=0.0 for IVF_EffiMorphPP in sanity (already done)
-- [x] Set label_smoothing=0.0 in make_loss_fn for sanity mode
-- [x] Confirm mixup/cutmix not present (not needed)
+## 2. Add y_pred Distribution & Confusion Matrix (Eval)
+- [x] Print y_pred counts and normalized ratios after predictions
+- [x] Print confusion matrix and per-class recall using valid mask
+- [x] Save confusion matrix in metrics json
 
-## 3. Sanity Optimizer
-- [x] Use Adam(lr=args.sanity_lr default 2e-3, wd=0) in sanity mode
-- [x] No scheduler in sanity mode
-- [x] Use sanity_epochs default 60
+## 3. Add Train-Time Diagnostics (scripts/train_gardner_single.py)
+- [x] Print startup info: task, num_classes, train/val sizes, class distributions
+- [x] Print loss settings confirmation (loss_name, label_smoothing, use_class_weights)
+- [x] Print class weights tensor if applied
+- [x] Add validation-time y_pred distribution logging each epoch
+- [x] Ensure EXP uses CrossEntropyLoss with label_smoothing (PyTorch supports it)
+- [x] Write debug_report.txt after each epoch with diagnostics
 
-## 4. Fail-fast
-- [x] After sanity training, evaluate deterministic train_acc on tiny set
-- [x] If train_acc < 0.95, print diagnostics and exit(1)
-- [x] Do NOT resume normal training if failed
+## 4. Diagnose Low Performance (Auto-Report)
+- [x] Write debug_report.txt with best epoch, y_pred distribution, confusion matrix
+- [x] Include class weights, sampler info, current LR
+- [x] Detect majority-class collapse (>80% on single class)
 
-## 5. Sanity Model Scale Preset
-- [x] Add width_mult mapping: small=1.0, base=1.25, large=1.5 (or auto-bump to 2.0 if params <3M)
-- [x] Print param count and channel config in sanity mode
-- [x] Update model creation in sanity to use width_mult
-
-## 6. Testing and Validation
-- [x] Test the changes with example commands
-- [x] Ensure backward compatibility
+## 5. Optional: Weighted Random Sampler
+- [x] Add data.use_weighted_sampler config flag
+- [x] Implement WeightedRandomSampler for train DataLoader if enabled
+- [x] Print sampler weights when used

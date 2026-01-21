@@ -36,7 +36,7 @@ optimizer:
 
 scheduler:
   name: cosine
-  warmup_epochs: 5
+  warmup_epochs: 2
 
 # Augmentation (applied ONLY during training)
 augmentation:
