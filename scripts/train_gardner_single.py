@@ -402,7 +402,8 @@ def train_one_run(cfg, args) -> None:
     print(f"  use_class_weights={use_class_weights}, compute_class_weights_from_train={bool(cfg.compute_class_weights_from_train) if hasattr(cfg, 'compute_class_weights_from_train') else False}")
     print(f"  use_weighted_sampler={use_weighted_sampler}")
     if task == "exp":
-        print(f"  label_smoothing={0.0 if sanity_mode else 0.1}")
+        actual_smoothing = 0.0 if use_weighted_sampler else (0.0 if sanity_mode else 0.1)
+        print(f"  label_smoothing={actual_smoothing}")
     else:
         print(f"  focal_gamma=2.0")
 
