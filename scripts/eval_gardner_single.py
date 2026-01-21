@@ -133,6 +133,8 @@ def main():
                         help="Disable strict load_state_dict (allow missing/extra keys)")
     parser.add_argument("--use_coral", type=int, default=0,
                         help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
+    parser.add_argument("--coral_thr", type=float, default=0.5,
+                        help="Decision threshold for CORAL ordinal regression (default: 0.5)")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -202,7 +204,7 @@ def main():
             images = images.to(device, non_blocking=True)
             outputs = model(images)
             if args.use_coral and args.task == "exp":
-                preds = coral_predict_class(outputs)
+                preds = coral_predict_class(outputs, threshold=args.coral_thr)
                 probs = torch.sigmoid(outputs)  # For CORAL, use sigmoid for probabilities
             else:
                 probs = torch.softmax(outputs, dim=1)
