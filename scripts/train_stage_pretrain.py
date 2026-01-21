@@ -33,7 +33,11 @@ from torchvision import transforms
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import inspect
 from src.model import IVF_EffiMorphPP
+
+# [DEBUG] Verify model location
+print("[DEBUG] IVF_EffiMorphPP imported from:", inspect.getfile(IVF_EffiMorphPP))
 
 
 # =============================================
@@ -316,8 +320,16 @@ def main(args):
     
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  Model class: {model.__class__.__name__}")
     print(f"  Total params: {total_params:,}")
     print(f"  Trainable params: {trainable_params:,}")
+    
+    # [DEBUG] Verify backbone size
+    if total_params < 2_000_000:
+        print(f"\n[WARNING] Model seems lightweight (~{total_params/1e6:.1f}M params)")
+        print(f"  Expected backbone: ~8-9M params")
+        print(f"  Suggest using width_mult=2.0 or checking model architecture")
+        print(f"  Continuing with current model...\n")
     
     # -----------------------------------------------
     # 5. Setup training
