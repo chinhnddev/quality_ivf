@@ -1,28 +1,32 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 
 
+# -------------------------
+# Attention blocks
+# -------------------------
 class SimAM(nn.Module):
     def __init__(self, channels):
-        super(SimAM, self).__init__()
-        self.channels = channels
+        super().__init__()
         self.activation = nn.Sigmoid()
 
     def forward(self, x):
         b, c, h, w = x.size()
         n = h * w - 1
-        x_minus_mu_square = (x - x.mean(dim=[2, 3], keepdim=True)).pow(2)
-        y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-8)) + 0.5
+        mu = x.mean(dim=[2, 3], keepdim=True)
+        var = (x - mu).pow(2)
+        y = var / (4 * (var.sum(dim=[2, 3], keepdim=True) / n + 1e-8)) + 0.5
         return x * self.activation(y)
 
 
 class ECA(nn.Module):
     def __init__(self, channels, k_size=5):
-        super(ECA, self).__init__()
+        super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
+        self.conv = nn.Conv1d(
+            1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False
+        )
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
@@ -32,53 +36,111 @@ class ECA(nn.Module):
         return x * self.sigmoid(y)
 
 
+# -------------------------
+# Multi-scale block
+# -------------------------
 class MultiScaleBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(MultiScaleBlock, self).__init__()
+        super().__init__()
         c = out_channels // 3
-        self.branch1 = nn.Conv2d(in_channels, c, kernel_size=3, padding=1)
-        self.branch2 = nn.Conv2d(in_channels, c, kernel_size=5, padding=2)
-        self.branch3 = nn.Conv2d(in_channels, out_channels - 2*c, kernel_size=7, padding=3)
-        self.proj = nn.Conv2d(out_channels, out_channels, kernel_size=1)
+
+        self.branch1 = nn.Sequential(
+            nn.Conv2d(in_channels, c, 3, padding=1, bias=False),
+            nn.BatchNorm2d(c),
+            nn.ReLU(inplace=True),
+        )
+        self.branch2 = nn.Sequential(
+            nn.Conv2d(in_channels, c, 5, padding=2, bias=False),
+            nn.BatchNorm2d(c),
+            nn.ReLU(inplace=True),
+        )
+        self.branch3 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels - 2 * c, 7, padding=3, bias=False),
+            nn.BatchNorm2d(out_channels - 2 * c),
+            nn.ReLU(inplace=True),
+        )
+
+        self.proj = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
         self.simam = SimAM(out_channels)
 
+        self.use_res = in_channels == out_channels
+        if not self.use_res:
+            self.skip = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+
     def forward(self, x):
-        b1 = self.branch1(x)
-        b2 = self.branch2(x)
-        b3 = self.branch3(x)
-        x = torch.cat([b1, b2, b3], dim=1)
+        identity = x
+
+        x = torch.cat(
+            [self.branch1(x), self.branch2(x), self.branch3(x)], dim=1
+        )
         x = self.proj(x)
         x = self.simam(x)
+
+        if self.use_res:
+            x = x + identity
+        else:
+            x = x + self.skip(identity)
         return x
 
 
+# -------------------------
+# Depthwise block with residual
+# -------------------------
 class DWConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1, dilation=1):
-        super(DWConvBlock, self).__init__()
-        self.dw = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=stride, padding=dilation, dilation=dilation, groups=in_channels)
-        self.pw = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        super().__init__()
+
+        self.dw = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                in_channels,
+                3,
+                stride=stride,
+                padding=dilation,
+                dilation=dilation,
+                groups=in_channels,
+                bias=False,
+            ),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+        )
+
+        self.pw = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
         self.simam = SimAM(out_channels)
 
+        self.use_res = stride == 1 and in_channels == out_channels
+
     def forward(self, x):
+        identity = x
+
         x = self.dw(x)
         x = self.pw(x)
         x = self.simam(x)
+
+        if self.use_res:
+            x = x + identity
         return x
 
 
+# -------------------------
+# IVF_EffiMorphPP
+# -------------------------
 class IVF_EffiMorphPP(nn.Module):
     """
-    Scalable IVF_EffiMorphPP.
-
-    Scaling rule:
-      base = make_divisible(base_channels * width_mult)
-      stage1_out = 2*base
-      stage2_out = 4*base
-      stage3_out = 8*base
-      stage4_out = 16*base
-
-    Default (base_channels=32, width_mult=1.0) reproduces original channels:
-      stem=32, s1=64, s2=128, s3=256, s4=512
+    Stable IVF_EffiMorphPP
+    - BN + Residual
+    - Concat fusion
+    - LayerNorm head (batch-size safe)
     """
 
     def __init__(
@@ -92,93 +154,82 @@ class IVF_EffiMorphPP(nn.Module):
     ):
         super().__init__()
 
-        def make_divisible(v: float, div: int = 8, min_value: int | None = None) -> int:
-            if min_value is None:
-                min_value = div
-            new_v = max(min_value, int(v + div / 2) // div * div)
-            # ensure we don't round down by more than 10%
-            if new_v < 0.9 * v:
-                new_v += div
-            return int(new_v)
+        def make_divisible(v, d=8):
+            return int((v + d / 2) // d * d)
 
-        # Compute scaled channels
         base = make_divisible(base_channels * width_mult, divisor)
-        c_stem = base
-        c1 = make_divisible(2 * base, divisor)   # stage1 out
-        c2 = make_divisible(4 * base, divisor)   # stage2 out
-        c3 = make_divisible(8 * base, divisor)   # stage3 out
-        c4 = make_divisible(16 * base, divisor)  # stage4 out
-
-        self._channels = {"stem": c_stem, "s1": c1, "s2": c2, "s3": c3, "s4": c4}
+        c1 = make_divisible(2 * base, divisor)
+        c2 = make_divisible(4 * base, divisor)
+        c3 = make_divisible(8 * base, divisor)
+        c4 = make_divisible(16 * base, divisor)
 
         # Stem
-        self.stem = nn.Conv2d(3, c_stem, kernel_size=3, stride=2, padding=1)
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, base, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(base),
+            nn.ReLU(inplace=True),
+        )
 
-        # Stage 1: Multi-scale @112x112 -> 56x56
-        self.stage1 = MultiScaleBlock(c_stem, c1)
-        self.stage1_down = nn.Conv2d(c1, c1, kernel_size=3, stride=2, padding=1)
+        # Stages
+        self.stage1 = MultiScaleBlock(base, c1)
+        self.stage1_down = nn.Sequential(
+            nn.Conv2d(c1, c1, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(c1),
+            nn.ReLU(inplace=True),
+        )
 
-        # Stage 2: DW+PW @56x56 -> 28x28
         self.stage2 = DWConvBlock(c1, c2, stride=2)
-
-        # Stage 3: DW+PW with dilation @28x28 -> 14x14
         self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=2)
-
-        # Stage 4: DW+PW @14x14 -> 7x7
         self.stage4 = DWConvBlock(c3, c4, stride=2)
 
-        # Multi-scale fusion (project s2/s3/s4 -> c4 then gated sum)
-        self.fusion_conv2 = nn.Conv2d(c2, c4, kernel_size=1)
-        self.fusion_conv3 = nn.Conv2d(c3, c4, kernel_size=1)
-        self.fusion_conv4 = nn.Conv2d(c4, c4, kernel_size=1)
-        self.gates = nn.Parameter(torch.ones(3))  # alpha, beta, gamma
-
-        self.eca = ECA(c4, k_size=eca_k)
+        # Fusion
+        self.fusion = nn.Sequential(
+            nn.Conv2d(c2 + c3 + c4, c4, 1, bias=False),
+            nn.BatchNorm2d(c4),
+            nn.ReLU(inplace=True),
+        )
+        self.eca = ECA(c4, eca_k)
 
         # Head
+        hidden = max(128, c4 // 2)
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout(dropout_p)
-        self.fc1 = nn.Linear(c4, max(128, c4 // 2))
-        self.fc2 = nn.Linear(max(128, c4 // 2), num_classes)
+        self.head = nn.Sequential(
+            nn.Linear(c4, hidden),
+            nn.LayerNorm(hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout_p * 0.5),
+            nn.Linear(hidden, num_classes),
+        )
 
     def forward(self, x):
-        # Stem
-        x = self.stem(x)  # 112x112
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage1_down(x)
 
-        # Stage 1
-        x = self.stage1(x)        # 112x112
-        x = self.stage1_down(x)   # 56x56
+        s2 = self.stage2(x)
+        s3 = self.stage3(s2)
+        s4 = self.stage4(s3)
 
-        # Stage 2
-        s2 = self.stage2(x)       # 28x28
-
-        # Stage 3
-        s3 = self.stage3(s2)      # 14x14
-
-        # Stage 4
-        s4 = self.stage4(s3)      # 7x7
-
-        # Fusion
         s2_up = F.interpolate(s2, size=(7, 7), mode="bilinear", align_corners=False)
         s3_up = F.interpolate(s3, size=(7, 7), mode="bilinear", align_corners=False)
 
-        s2_f = self.fusion_conv2(s2_up)
-        s3_f = self.fusion_conv3(s3_up)
-        s4_f = self.fusion_conv4(s4)
-
-        weights = F.softmax(self.gates, dim=0)
-        fused = weights[0] * s2_f + weights[1] * s3_f + weights[2] * s4_f
-
+        fused = torch.cat([s2_up, s3_up, s4], dim=1)
+        fused = self.fusion(fused)
         fused = self.eca(fused)
 
-        # Head
         x = self.gap(fused).flatten(1)
         x = self.dropout(x)
-        x = F.relu(self.fc1(x), inplace=True)
-        x = self.fc2(x)
+        x = self.head(x)
         return x
 
-    def count_params(self):
-        total = sum(p.numel() for p in self.parameters())
-        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        return total, trainable, dict(self._channels)
+
+# -------------------------
+# Quick sanity check
+# -------------------------
+if __name__ == "__main__":
+    model = IVF_EffiMorphPP(num_classes=5)
+    x = torch.randn(2, 3, 224, 224)
+    y = model(x)
+    print("Output:", y.shape)
+    print("Params:", sum(p.numel() for p in model.parameters()) // 1_000_000, "M")

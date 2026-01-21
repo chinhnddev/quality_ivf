@@ -1,12 +1,11 @@
-# src/losses.py
 """
 Loss utilities for Gardner EXP / ICM / TE experiments.
 
 Supported:
 - CrossEntropy (optionally with class weights)
 - CrossEntropy with label smoothing (EXP improved)
-- Focal Loss (ICM/TE improved)
-- Class weight computation from TRAIN split only
+- Focal Loss with alpha (ICM/TE improved)
+- Effective Number of Samples weighting (better for extreme imbalance)
 
 IMPORTANT RULES
 - Class weights MUST be computed from TRAIN distribution only.
@@ -22,77 +21,73 @@ import torch.nn.functional as F
 
 
 # ------------------------------------------------------------
-# Class weight utilities
+# Class weight utilities (Effective Number of Samples)
 # ------------------------------------------------------------
-
 def compute_class_weights(
     labels: Iterable[int],
     num_classes: int,
-    eps: float = 1e-8
+    eps: float = 1e-8,
+    beta: float = 0.9999  # Effective Number hyperparam (close to 1 → strong reweight for rare classes)
 ) -> torch.Tensor:
     """
-    Compute inverse-frequency normalized class weights:
-        w_c = N_total / (K * N_c)
-
-    Args:
-        labels: iterable of integer labels AFTER filtering valid samples
-        num_classes: number of classes (EXP=5, ICM/TE=3)
-        eps: numerical stability
-
-    Returns:
-        torch.Tensor of shape (num_classes,)
+    Compute class weights using Effective Number of Samples (Cui et al. 2019):
+        effective_num = 1 - beta^n_c
+        w_c = (1 - beta) / (effective_num + eps)
+    Normalize to sum ~ num_classes, boost missing classes lightly if needed.
     """
     counts = np.zeros(num_classes, dtype=np.float64)
-
     for y in labels:
         if 0 <= int(y) < num_classes:
             counts[int(y)] += 1
 
-    total = counts.sum()
-    K = float(num_classes)
+    effective_num = 1.0 - np.power(beta, counts)
+    weights = (1.0 - beta) / (effective_num + eps)
 
-    weights = np.zeros(num_classes, dtype=np.float64)
-    for c in range(num_classes):
-        if counts[c] > 0:
-            weights[c] = total / (K * (counts[c] + eps))
+    # Normalize weights to sum to num_classes
+    sum_w = weights.sum()
+    if sum_w > 0:
+        weights = weights / sum_w * num_classes
+    else:
+        weights = np.ones(num_classes)  # fallback (unlikely)
+
+    # Boost missing classes lightly to avoid complete ignore
+    missing = counts == 0
+    if missing.any():
+        valid_weights = weights[~missing]
+        if len(valid_weights) > 0:
+            mean_valid = valid_weights.mean()
+            weights[missing] = mean_valid * 1.5  # nhẹ boost
         else:
-            # Missing class in training set
-            # Set weight to 0 and warn upstream
-            weights[c] = 0.0
+            weights[missing] = 1.0
+        print(f"[INFO] Boosted weights for missing classes: {weights[missing].tolist()}")
 
     return torch.tensor(weights, dtype=torch.float32)
 
 
 # ------------------------------------------------------------
-# Focal loss
+# Focal loss with alpha
 # ------------------------------------------------------------
-
 class FocalLoss(nn.Module):
     """
-    Multi-class focal loss:
-        FL = (1 - p_t)^gamma * CE
-
-    Works on logits directly (no softmax needed).
+    Multi-class focal loss with optional alpha (class-balanced):
+        FL = alpha_t * (1 - p_t)^gamma * CE
+    Works on logits directly.
     """
-
     def __init__(
         self,
         gamma: float = 2.0,
+        alpha: Optional[torch.Tensor] = None,
         weight: Optional[torch.Tensor] = None
     ):
         super().__init__()
         self.gamma = gamma
+        self.alpha = alpha  # shape (C,) or None
         if weight is not None:
             self.register_buffer("weight", weight)
         else:
             self.weight = None
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            logits: (N, C)
-            targets: (N,)
-        """
         ce = F.cross_entropy(
             logits,
             targets,
@@ -100,14 +95,18 @@ class FocalLoss(nn.Module):
             reduction="none"
         )
         pt = torch.exp(-ce)
-        loss = ((1.0 - pt) ** self.gamma) * ce
-        return loss.mean()
+        focal = (1.0 - pt) ** self.gamma * ce
+
+        if self.alpha is not None:
+            alpha_t = self.alpha[targets]
+            focal = alpha_t * focal
+
+        return focal.mean()
 
 
 # ------------------------------------------------------------
 # Loss factory
 # ------------------------------------------------------------
-
 def get_loss_fn(
     *,
     track: str,
@@ -120,51 +119,39 @@ def get_loss_fn(
 ) -> nn.Module:
     """
     Factory function to build the correct loss for a given task/track.
-
-    Args:
-        track: "benchmark_fair" or "improved"
-        task: "exp", "icm", or "te"
-        num_classes: 5 for EXP, 3 for ICM/TE
-        train_labels: labels from TRAIN split AFTER filtering valid samples
-        use_class_weights: whether to compute and use class weights
-        label_smoothing: used for EXP in improved track
-        focal_gamma: used for ICM/TE in improved track
-
-    Returns:
-        nn.Module loss function
     """
-
     weight = None
     if use_class_weights:
-        weight = compute_class_weights(train_labels, num_classes)
-        if (weight == 0).any():
-            missing = [i for i, w in enumerate(weight.tolist()) if w == 0.0]
-            print(
-                f"[WARN][losses] Missing classes in TRAIN for task={task}: {missing}. "
-                f"Corresponding class weights set to 0."
-            )
+        weight = compute_class_weights(train_labels, num_classes, beta=0.9999)
+        print(f"[INFO] Class weights for task={task} (Effective Num, beta=0.9999):")
+        for i, w in enumerate(weight.tolist()):
+            print(f"  Class {i}: weight={w:.4f}")
+
+        missing = [i for i, w in enumerate(weight.tolist()) if w == 0.0 or np.isnan(w)]
+        if missing:
+            print(f"[WARN] Missing or NaN classes in TRAIN for task={task}: {missing}")
 
     # -------------------------
-    # Benchmark-fair
+    # Benchmark-fair (same as paper baseline)
     # -------------------------
     if track == "benchmark_fair":
-        # Same CE for all tasks, no tricks
         return nn.CrossEntropyLoss(weight=weight)
 
     # -------------------------
-    # Improved
+    # Improved track
     # -------------------------
     if track == "improved":
         if task == "exp":
-            # EXP: CE + label smoothing
+            # EXP: CE + label smoothing (giá trị từ config, default 0.0)
             return nn.CrossEntropyLoss(
                 weight=weight,
                 label_smoothing=label_smoothing
             )
         else:
-            # ICM / TE: Focal loss (+ optional weights)
+            # ICM / TE: Focal + alpha (class-balanced) + weight
             return FocalLoss(
                 gamma=focal_gamma,
+                alpha=weight,      # dùng weight làm alpha
                 weight=weight
             )
 
