@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 from sklearn.metrics import f1_score, accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms
 from PIL import Image
 
@@ -388,42 +388,44 @@ def train_one_run(cfg, args) -> None:
         pct = 100.0 * count / len(train_labels)
         print(f"  Class {cls}: {count} samples ({pct:.1f}%)")
 
+    # Define flags early
+    use_class_weights = bool(cfg.use_class_weights)
+    use_weighted_sampler = bool(args.use_weighted_sampler)
+
     # Startup diagnostics
     print(f"\n[STARTUP DIAGNOSTICS] task={task}, num_classes={num_classes}")
     print(f"  train_size={len(ds_train)}, val_size={len(ds_val)}")
     print(f"  track={track}, loss_name={'CrossEntropyLoss' if task == 'exp' else 'FocalLoss'}")
     print(f"  use_class_weights={use_class_weights}, compute_class_weights_from_train={bool(cfg.compute_class_weights_from_train) if hasattr(cfg, 'compute_class_weights_from_train') else False}")
+    print(f"  use_weighted_sampler={use_weighted_sampler}")
     if task == "exp":
         print(f"  label_smoothing={0.0 if sanity_mode else 0.1}")
     else:
         print(f"  focal_gamma=2.0")
 
-    # Dataloaders
-    batch_size = int(cfg.train.batch_size)
-    num_workers = int(cfg.data.num_workers) if "data" in cfg else 4
-    use_weighted_sampler = bool(getattr(cfg.data, 'use_weighted_sampler', False))
+    # WeightedRandomSampler setup and logging at startup
+    sampler = None
 
     if use_weighted_sampler:
-        # Build WeightedRandomSampler from train labels
-        from torch.utils.data import WeightedRandomSampler
-        sample_weights = []
-        for label in train_labels:
-            # Use inverse frequency weights
-            weight = 1.0 / label_counts[label]
-            sample_weights.append(weight)
-        sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
-        dl_train = DataLoader(ds_train, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True)
-        print(f"Using WeightedRandomSampler with {len(sample_weights)} samples")
-        print(f"Sample weights (first 5): {sample_weights[:5]}")
-    else:
-        dl_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+        # Build sample weights from train labels
+        sample_weights = [1.0 / label_counts[label] for label in train_labels]
 
-    dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True
+        )
 
-    # Model import (EDIT THIS LINE to match your repo)
-    # Example:
-    # from src.model import IVF_EffiMorphPP
-    # model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=float(cfg.model.dropout))
+        print("Using WeightedRandomSampler")
+        print(f"Class counts: {dict(sorted(label_counts.items()))}")
+        print(f"Class weights: {dict(sorted({cls: 1.0 / count for cls, count in label_counts.items()}.items()))}")
+        print(f"Sample weights (first 10): {sample_weights[:10]}")
+
+    # Warning if both are enabled
+    if use_weighted_sampler and use_class_weights:
+        print("[WARN] Both --use_weighted_sampler=1 and --use_class_weights=1 are enabled. This may lead to double weighting.")
+
+    # Model import and device setup first for pin_memory
     try:
         from src.model import IVF_EffiMorphPP  # <-- change if your path differs
     except Exception as e:
@@ -452,6 +454,20 @@ def train_one_run(cfg, args) -> None:
     print(f"Device: {device}")
     if args.sanity_overfit:
         print(f"[SANITY MODE] Using dropout_p=0.0 for overfitting test")
+
+    # Dataloaders
+    batch_size = int(cfg.train.batch_size)
+    num_workers = int(cfg.data.num_workers) if "data" in cfg else 4
+
+    dl_train = DataLoader(
+        ds_train,
+        batch_size=batch_size,
+        sampler=sampler if use_weighted_sampler else None,
+        shuffle=False if use_weighted_sampler else True,
+        num_workers=num_workers,
+        pin_memory=(device.type == "cuda"),
+    )
+    dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=(device.type == "cuda"))
 
     # Print model summary
     if torchinfo_summary is not None:
@@ -687,7 +703,7 @@ def train_one_run(cfg, args) -> None:
         if use_class_weights:
             weights = compute_class_weights(train_labels, num_classes)
             f.write(f"Class weights tensor: {weights.tolist()}\n")
-        f.write(f"WeightedRandomSampler used: False\n")  # TODO: update when implemented
+        f.write(f"WeightedRandomSampler used: {use_weighted_sampler}\n")
         f.write(f"Current LR value: {opt.param_groups[0]['lr']:.6f}\n")
 
         # Check for majority-class collapse
@@ -726,6 +742,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--use_class_weights", type=int, default=None)
+    parser.add_argument("--use_weighted_sampler", type=int, default=0, help="Use WeightedRandomSampler for training (0=OFF, 1=ON)")
     parser.add_argument("--sanity_overfit", action="store_true",
                         help="Run sanity overfit test on a tiny subset then exit (fail-fast).")
 
@@ -764,6 +781,8 @@ def main():
         cfg.train.batch_size = args.batch_size
     if args.use_class_weights is not None:
         cfg.use_class_weights = bool(args.use_class_weights)
+    if args.use_weighted_sampler is not None:
+        cfg.use_weighted_sampler = bool(args.use_weighted_sampler)
 
     # Sanity: task/track must exist
     if "task" not in cfg or "track" not in cfg:
