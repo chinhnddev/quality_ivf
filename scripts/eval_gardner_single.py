@@ -235,7 +235,9 @@ def main():
     # If we have image names, merge by key; otherwise assume order matches CSV
     if len(all_img_names) == len(all_preds) and "Image" in split_df.columns:
         pred_rows = {"Image": all_img_names, "y_pred": all_preds}
-        for i in range(num_classes):
+        # Use actual number of outputs (4 for CORAL, 5 for standard)
+        num_outputs = len(all_probs[0]) if all_probs else num_classes
+        for i in range(num_outputs):
             pred_rows[f"prob_{i}"] = [p[i] for p in all_probs]
         pred_by_key = pd.DataFrame(pred_rows)
 
@@ -271,7 +273,9 @@ def main():
         preds_df["y_true_raw"] = preds_df[gt_col]
         preds_df["y_true"] = build_encoded_ytrue_column(preds_df, args.task)
         preds_df["y_pred"] = all_preds
-        for i in range(num_classes):
+        # Use actual number of outputs (4 for CORAL, 5 for standard)
+        num_outputs = len(all_probs[0]) if all_probs else num_classes
+        for i in range(num_outputs):
             preds_df[f"prob_{i}"] = [p[i] for p in all_probs]
 
     # Metrics (mask invalid labels)
