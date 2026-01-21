@@ -111,3 +111,84 @@ class GardnerDataset(Dataset):
 
         # Return filename too for preds.csv
         return image, torch.tensor(label, dtype=torch.long), label_raw, img_name
+
+# ==========================================
+# HumanEmbryoStageDataset
+# ==========================================
+class HumanEmbryoStageDataset(Dataset):
+    """
+    Dataset for stage pretraining using HumanEmbryo2.0 dataset.
+    
+    Loads images and maps developmental stages:
+    - cleavage -> 0
+    - morula -> 1
+    - blastocyst -> 2
+    """
+    
+    def __init__(self, csv_path, img_base_dir, split="train", augment=True):
+        """
+        Args:
+            csv_path: Path to humanembryo2.csv
+            img_base_dir: Base directory for images (e.g., data/HumanEmbryo2.0/)
+            split: 'train', 'val', or 'test'
+            augment: If True and split=='train', apply augmentations
+        """
+        self.img_base_dir = img_base_dir
+        self.split = split.lower()
+        self.augment = bool(augment) and self.split == "train"
+        
+        # Load metadata
+        df = pd.read_csv(csv_path)
+        
+        # Validate columns
+        required_cols = ["image_path", "stage", "split"]
+        for col in required_cols:
+            if col not in df.columns:
+                raise ValueError(f"CSV missing column: {col}. Got: {df.columns.tolist()}")
+        
+        # Filter by split
+        df = df[df["split"].str.lower() == self.split].copy()
+        df = df.reset_index(drop=True)
+        
+        # Stage mapping
+        stage_map = {"cleavage": 0, "morula": 1, "blastocyst": 2}
+        
+        # Extract image paths and labels
+        self.image_paths = df["image_path"].str.strip().tolist()
+        self.stage_labels = [stage_map.get(s.lower(), -1) for s in df["stage"].astype(str)]
+        
+        # Filter out invalid stages
+        valid_indices = [i for i, label in enumerate(self.stage_labels) if label >= 0]
+        self.image_paths = [self.image_paths[i] for i in valid_indices]
+        self.stage_labels = [self.stage_labels[i] for i in valid_indices]
+        
+        if len(self.image_paths) == 0:
+            raise ValueError(f"No valid samples found for split '{self.split}' in {csv_path}")
+        
+        # Transforms
+        base = [
+            transforms.Resize((224, 224)),
+            transforms.CenterCrop((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ]
+        
+        if self.augment:
+            aug = [
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
+            ]
+            self.transform = transforms.Compose(aug + base)
+        else:
+            self.transform = transforms.Compose(base)
+    
+    def __len__(self):
+        return len(self.image_paths)
+    
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.img_base_dir, self.image_paths[idx])
+        image = Image.open(img_path).convert("RGB")
+        image = self.transform(image)
+        label = torch.tensor(self.stage_labels[idx], dtype=torch.long)
+        
+        return image, label
