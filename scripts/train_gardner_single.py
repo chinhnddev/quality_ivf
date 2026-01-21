@@ -100,7 +100,7 @@ class FocalLoss(nn.Module):
         return loss.mean()
 
 
-def make_loss_fn(track: str, task: str, num_classes: int, use_class_weights: bool, train_labels: List[int], sanity_mode: bool = False) -> nn.Module:
+def make_loss_fn(track: str, task: str, num_classes: int, use_class_weights: bool, train_labels: List[int], sanity_mode: bool = False, use_weighted_sampler: bool = False) -> nn.Module:
     weights = None
     if use_class_weights:
         weights = compute_class_weights(train_labels, num_classes)
@@ -116,8 +116,11 @@ def make_loss_fn(track: str, task: str, num_classes: int, use_class_weights: boo
         return nn.CrossEntropyLoss(weight=weights)
     if track == "improved":
         if task == "exp":
-            # label smoothing for EXP (disable in sanity mode)
-            label_smoothing = 0.0 if sanity_mode else 0.1
+            # label smoothing for EXP (disable in sanity mode or when using weighted sampler)
+            if use_weighted_sampler:
+                label_smoothing = 0.0
+            else:
+                label_smoothing = 0.0 if sanity_mode else 0.1
             return nn.CrossEntropyLoss(weight=weights, label_smoothing=label_smoothing)
         # focal for ICM/TE
         return FocalLoss(gamma=2.0, weight=weights)
@@ -493,7 +496,7 @@ def train_one_run(cfg, args) -> None:
     # Loss
     use_class_weights = bool(cfg.use_class_weights)
     loss_fn = make_loss_fn(track=track, task=task, num_classes=num_classes,
-                           use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode)
+                           use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode, use_weighted_sampler=use_weighted_sampler)
 
     # Optimizer / scheduler
     lr = float(cfg.optimizer.lr)
