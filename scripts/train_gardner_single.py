@@ -32,6 +32,26 @@ from src.loss_coral import coral_loss, coral_predict_class
 
 
 # =========================
+# Checkpoint Loading
+# =========================
+
+def load_backbone_only(model, ckpt_path: str, device="cpu"):
+    """Load stage-pretrain backbone weights, excluding head layers."""
+    ckpt = torch.load(ckpt_path, map_location=device)
+    state = ckpt.get("model_state_dict", ckpt)  # support both formats
+    
+    # drop any head weights
+    state = {k: v for k, v in state.items() if not k.startswith("head.")}
+    
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    print(f"[PRETRAIN LOAD] loaded backbone from: {ckpt_path}")
+    print(f"[PRETRAIN LOAD] missing keys (expected head.*): {missing[:10]}{'...' if len(missing)>10 else ''}")
+    if unexpected:
+        print(f"[PRETRAIN LOAD] unexpected keys: {unexpected}")
+    return model
+
+
+# =========================
 # Utils
 # =========================
 
@@ -475,6 +495,11 @@ def train_one_run(cfg, args) -> None:
         model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, task=task, use_coral=use_coral)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
+    
+    # Load pretrained backbone if provided
+    if args.pretrain_ckpt:
+        model = load_backbone_only(model, args.pretrain_ckpt, device=device)
+    
     print(f"Device: {device}")
     if args.sanity_overfit:
         print(f"[SANITY MODE] Using dropout_p=0.0 for overfitting test")
@@ -796,6 +821,9 @@ def main():
     parser.add_argument("--sanity_model_scale", type=str, default="large",
                         choices=["small", "base", "large"],
                         help="Model capacity preset used in sanity mode.")
+
+    parser.add_argument("--pretrain_ckpt", type=str, default="",
+                        help="Path to stage-pretrain best.ckpt for backbone initialization.")
 
     args = parser.parse_args()
 
