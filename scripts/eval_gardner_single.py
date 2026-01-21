@@ -25,6 +25,7 @@ from sklearn.metrics import (
 
 from src.dataset import GardnerDataset
 from src.model import IVF_EffiMorphPP
+from src.loss_coral import coral_predict_class
 
 
 def set_seed(seed: int) -> None:
@@ -130,6 +131,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_strict", action="store_true",
                         help="Disable strict load_state_dict (allow missing/extra keys)")
+    parser.add_argument("--use_coral", type=int, default=0,
+                        help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -170,6 +173,15 @@ def main():
     model.load_state_dict(state, strict=strict)
     model.eval()
 
+    # Safety check for CORAL
+    if args.use_coral and args.task == "exp":
+        # Test forward pass to check output shape
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, 224, 224).to(device)
+            dummy_output = model(dummy_input)
+            assert dummy_output.shape[1] == 4, f"Expected 4 CORAL logits for EXP, got {dummy_output.shape[1]}"
+        print(f"[CORAL] Model outputs {dummy_output.shape[1]} logits for EXP ordinal regression")
+
     # Predict
     all_preds: List[int] = []
     all_probs: List[List[float]] = []
@@ -189,8 +201,12 @@ def main():
 
             images = images.to(device, non_blocking=True)
             outputs = model(images)
-            probs = torch.softmax(outputs, dim=1)
-            preds = torch.argmax(outputs, dim=1)
+            if args.use_coral and args.task == "exp":
+                preds = coral_predict_class(outputs)
+                probs = torch.sigmoid(outputs)  # For CORAL, use sigmoid for probabilities
+            else:
+                probs = torch.softmax(outputs, dim=1)
+                preds = torch.argmax(outputs, dim=1)
 
             all_preds.extend(preds.detach().cpu().numpy().tolist())
             all_probs.extend(probs.detach().cpu().numpy().tolist())

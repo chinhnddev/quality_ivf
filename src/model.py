@@ -141,6 +141,7 @@ class IVF_EffiMorphPP(nn.Module):
     - BN + Residual
     - Concat fusion
     - LayerNorm head (batch-size safe)
+    - Supports CORAL ordinal regression for EXP task
     """
 
     def __init__(
@@ -151,6 +152,8 @@ class IVF_EffiMorphPP(nn.Module):
         base_channels: int = 32,
         divisor: int = 8,
         eca_k: int = 5,
+        task: str = "exp",
+        use_coral: bool = False,
     ):
         super().__init__()
 
@@ -194,12 +197,16 @@ class IVF_EffiMorphPP(nn.Module):
         hidden = max(128, c4 // 2)
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout(dropout_p)
+
+        # For CORAL ordinal regression on EXP task, output K-1 logits instead of K
+        # CORAL uses K-1 thresholds for K classes (0 to K-1)
+        output_dim = num_classes - 1 if (task == "exp" and use_coral) else num_classes
         self.head = nn.Sequential(
             nn.Linear(c4, hidden),
             nn.LayerNorm(hidden),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout_p * 0.5),
-            nn.Linear(hidden, num_classes),
+            nn.Linear(hidden, output_dim),
         )
 
     def forward(self, x):

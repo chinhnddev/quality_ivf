@@ -27,6 +27,9 @@ except ImportError:
 # Add parent directory to path to import src module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Import CORAL functions
+from src.loss_coral import coral_loss, coral_predict_class
+
 
 # =========================
 # Utils
@@ -100,7 +103,10 @@ class FocalLoss(nn.Module):
         return loss.mean()
 
 
-def make_loss_fn(track: str, task: str, num_classes: int, use_class_weights: bool, train_labels: List[int], sanity_mode: bool = False, use_weighted_sampler: bool = False) -> nn.Module:
+def make_loss_fn(track: str, task: str, num_classes: int, use_class_weights: bool, train_labels: List[int], sanity_mode: bool = False, use_weighted_sampler: bool = False, use_coral: bool = False) -> nn.Module:
+    if use_coral and task == "exp":
+        # CORAL loss for ordinal regression
+        return lambda logits, targets: coral_loss(logits, targets, num_classes)
     weights = None
     if use_class_weights:
         weights = compute_class_weights(train_labels, num_classes)
@@ -283,7 +289,7 @@ def print_label_summary(df: pd.DataFrame, task: str, label_col: str, split_name:
 # =========================
 
 @torch.no_grad()
-def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict:
+def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, use_coral: bool = False) -> Dict:
     model.eval()
     ys, ps = [], []
     for batch in loader:
@@ -294,7 +300,10 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device) 
             x, y, _ = batch
         x = x.to(device)
         logits = model(x)
-        pred = logits.argmax(dim=1).cpu().numpy().tolist()
+        if use_coral:
+            pred = coral_predict_class(logits).cpu().numpy().tolist()
+        else:
+            pred = logits.argmax(dim=1).cpu().numpy().tolist()
         ys.extend(y.numpy().tolist())
         ps.extend(pred)
     acc = accuracy_score(ys, ps) if len(ys) else 0.0
@@ -452,22 +461,32 @@ def train_one_run(cfg, args) -> None:
     dropout_p_value = 0.0 if args.sanity_overfit else float(cfg.model.dropout)
 
     # Sanity model scale preset
+    use_coral = bool(args.use_coral) and task == "exp"
     if args.sanity_overfit:
         scale_mapping = {"small": 1.0, "base": 1.25, "large": 1.5}
         width_mult = scale_mapping[args.sanity_model_scale]
         # Auto-bump to 2.0 if params < 3M
-        temp_model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult)
+        temp_model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral)
         total_params = sum(p.numel() for p in temp_model.parameters())
         if total_params < 3_000_000 and args.sanity_model_scale == "large":
             width_mult = 2.0
-        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult)
+        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral)
     else:
-        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value)
+        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, task=task, use_coral=use_coral)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     print(f"Device: {device}")
     if args.sanity_overfit:
         print(f"[SANITY MODE] Using dropout_p=0.0 for overfitting test")
+
+    # Safety check for CORAL
+    if use_coral and task == "exp":
+        # Test forward pass to check output shape
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, 224, 224).to(device)
+            dummy_output = model(dummy_input)
+            assert dummy_output.shape[1] == 4, f"Expected 4 CORAL logits for EXP, got {dummy_output.shape[1]}"
+        print(f"[CORAL] Model outputs {dummy_output.shape[1]} logits for EXP ordinal regression")
 
     # Dataloaders
     batch_size = int(cfg.train.batch_size)
@@ -501,8 +520,9 @@ def train_one_run(cfg, args) -> None:
 
     # Loss
     use_class_weights = bool(cfg.use_class_weights)
+    use_coral = bool(args.use_coral) and task == "exp"
     loss_fn = make_loss_fn(track=track, task=task, num_classes=num_classes,
-                           use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode, use_weighted_sampler=use_weighted_sampler)
+                           use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode, use_weighted_sampler=use_weighted_sampler, use_coral=use_coral)
 
     # Optimizer / scheduler
     lr = float(cfg.optimizer.lr)
@@ -689,7 +709,7 @@ def train_one_run(cfg, args) -> None:
         train_loss = running / max(n, 1)
 
         # val
-        val_metrics = evaluate_on_val(model, dl_val, device)
+        val_metrics = evaluate_on_val(model, dl_val, device, use_coral)
         monitor = val_metrics["macro_f1"]  # align with cfg.monitor.metric if you prefer parsing it
         print(f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f} | "
               f"val_acc={val_metrics['acc']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
@@ -757,6 +777,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--use_class_weights", type=int, default=None)
     parser.add_argument("--use_weighted_sampler", type=int, default=0, help="Use WeightedRandomSampler for training (0=OFF, 1=ON)")
+    parser.add_argument("--use_coral", type=int, default=0, help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
     parser.add_argument("--sanity_overfit", action="store_true",
                         help="Run sanity overfit test on a tiny subset then exit (fail-fast).")
 
