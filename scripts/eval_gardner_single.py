@@ -170,15 +170,30 @@ def main():
 
     # Model
     num_classes = 5 if args.task == "exp" else 3
-    model = IVF_EffiMorphPP(num_classes, task=args.task, use_coral=bool(args.use_coral)).to(device)
-
+    
+    # Auto-detect CORAL from checkpoint if task is EXP
+    use_coral_flag = bool(args.use_coral)
+    if args.task == "exp" and args.checkpoint:
+        state_dict = load_state_dict_robust(args.checkpoint, device)
+        # Check final layer weight shape to infer CORAL
+        if "head.4.weight" in state_dict:
+            final_weight_shape = state_dict["head.4.weight"].shape
+            inferred_coral = (final_weight_shape[0] == 4)  # 4 outputs = CORAL, 5 = standard
+            if not args.use_coral and inferred_coral:
+                print(f"[INFO] Checkpoint has 4 outputs; auto-enabling CORAL")
+                use_coral_flag = True
+            elif args.use_coral and not inferred_coral:
+                print(f"[WARNING] --use_coral=1 but checkpoint has {final_weight_shape[0]} outputs (expected 4)")
+    
+    model = IVF_EffiMorphPP(num_classes, task=args.task, use_coral=use_coral_flag).to(device)
     state = load_state_dict_robust(args.checkpoint, device)
     strict = not args.no_strict
     model.load_state_dict(state, strict=strict)
     model.eval()
 
     # Safety check for CORAL
-    if args.use_coral and args.task == "exp":
+    coral_thresholds = None
+    if use_coral_flag and args.task == "exp":
         # Test forward pass to check output shape
         with torch.no_grad():
             dummy_input = torch.randn(1, 3, 224, 224).to(device)
@@ -213,7 +228,7 @@ def main():
 
             images = images.to(device, non_blocking=True)
             outputs = model(images)
-            if args.use_coral and args.task == "exp":
+            if use_coral_flag and args.task == "exp":
                 preds = coral_predict_class(outputs, thresholds=coral_thresholds)
                 probs = torch.sigmoid(outputs)  # For CORAL, use sigmoid for probabilities
             else:
@@ -337,7 +352,7 @@ def main():
     }
     
     # Add CORAL threshold info if applicable
-    if args.use_coral and args.task == "exp":
+    if use_coral_flag and args.task == "exp":
         if isinstance(coral_thresholds, list):
             metrics["coral_thresholds"] = coral_thresholds
         else:
