@@ -5,20 +5,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
 
-
-def _norm_token(x) -> str:
-    """Normalize to one of: '0','1','2','ND','NA',''."""
-    if pd.isna(x):
-        return ""
-    s = str(x).strip()
-    if s == "":
-        return ""
-    su = s.upper()
-    if su in {"ND", "NA"}:
-        return su
-    if s in {"0", "1", "2", "3", "4"}:
-        return s
-    return ""
+from .utils import normalize_exp_token, normalize_icm_te_token
 
 
 class GardnerDataset(Dataset):
@@ -35,24 +22,22 @@ class GardnerDataset(Dataset):
             if col not in df.columns:
                 raise ValueError(f"CSV missing required column: {col}. Got columns={df.columns.tolist()}")
 
-        # Normalize
         df["Image"] = df["Image"].astype(str).str.strip()
-        df["EXP"] = pd.to_numeric(df["EXP"], errors="coerce")  # EXP should be numeric codes 0..4
-        df["ICM"] = df["ICM"].apply(_norm_token)
-        df["TE"]  = df["TE"].apply(_norm_token)
+        if self.task == "exp":
+            df["norm_label"] = df["EXP"].apply(normalize_exp_token)
+        elif self.task in {"icm", "te"}:
+            df["norm_label"] = df[self.task.upper()].apply(normalize_icm_te_token)
+        else:
+            raise ValueError(f"Unknown task: {self.task}")
 
-        # Filtering rules
+        # Filtering
         if self.split in {"train", "val"}:
             if self.task == "exp":
-                df = df[df["EXP"].isin([0, 1, 2, 3, 4])].copy()
-            elif self.task == "icm":
-                df = df[df["ICM"].isin(["0", "1", "2"])].copy()
-            elif self.task == "te":
-                df = df[df["TE"].isin(["0", "1", "2"])].copy()
-            else:
-                raise ValueError(f"Unknown task: {self.task}")
+                valid = {"0", "1", "2", "3", "4"}
+                df = df[df["norm_label"].isin(valid)].copy()
+            else:  # icm / te
+                df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
         elif self.split == "test":
-            # No filtering; metrics will mask invalid labels for ICM/TE
             pass
         else:
             raise ValueError(f"Unknown split: {self.split}")
@@ -61,22 +46,13 @@ class GardnerDataset(Dataset):
 
         self.images = df["Image"].tolist()
 
-        # Build labels
         if self.task == "exp":
-            # For test we still expect EXP valid for all 300; but keep safe.
-            # Invalid -> -1
-            self.labels_raw = df["EXP"].tolist()
-            self.labels = [int(x) if pd.notna(x) and int(x) in [0,1,2,3,4] else -1 for x in df["EXP"]]
-        elif self.task == "icm":
-            self.labels_raw = df["ICM"].tolist()
-            mapping = {"0": 0, "1": 1, "2": 2}
-            self.labels = [mapping.get(tok, -1) for tok in self.labels_raw]  # -1 for ND/NA/''
-        elif self.task == "te":
-            self.labels_raw = df["TE"].tolist()
+            self.labels_raw = df["norm_label"].tolist()
+            self.labels = [int(lbl) for lbl in self.labels_raw]
+        else:
+            self.labels_raw = df["norm_label"].tolist()
             mapping = {"0": 0, "1": 1, "2": 2}
             self.labels = [mapping.get(tok, -1) for tok in self.labels_raw]
-        else:
-            raise ValueError(f"Unknown task: {self.task}")
 
         # Transforms
         if self.augment:

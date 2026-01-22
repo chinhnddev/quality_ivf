@@ -45,32 +45,65 @@ def set_seed(seed: int, deterministic: bool = True) -> None:
 # Label normalization / validation
 # ============================================================
 
-def normalize_token(x) -> str:
+def normalize_exp_token(x) -> str:
     """
-    Normalize label tokens (mainly for ICM / TE).
-
-    Output is one of:
-        '0', '1', '2', 'ND', 'NA', ''
-
-    Used BEFORE filtering / masking.
+    Normalize EXP tokens to one of '0','1','2','3','4','NA'.
+    Invalid / empty -> 'NA'.
     """
     if pd.isna(x):
-        return ""
-    if isinstance(x, (int, np.integer)):
-        return str(int(x))
-    if isinstance(x, (float, np.floating)):
-        if float(x).is_integer():
-            return str(int(x))
-        return ""
-    s = str(x).strip()
-    if s == "":
-        return ""
-    s_up = s.upper()
-    if s_up in {"ND", "NA"}:
-        return s_up
-    if s in {"0", "1", "2", "3", "4"}:
-        return s
-    return ""
+        return "NA"
+    try:
+        if isinstance(x, (int, np.integer)):
+            val = int(x)
+        elif isinstance(x, (float, np.floating)):
+            if np.isnan(x):
+                return "NA"
+            val = int(float(x))
+        else:
+            val = int(float(str(x).strip()))
+        if val in {0, 1, 2, 3, 4}:
+            return str(val)
+    except Exception:
+        pass
+    text = str(x).strip().upper()
+    if text == "NA":
+        return "NA"
+    return "NA"
+
+
+def normalize_icm_te_token(x) -> str:
+    """
+    Normalize ICM/TE to one of '0','1','2','ND','NA'.
+    Numeric -1 -> 'NA', 3 -> 'ND', invalid -> 'ND'.
+    """
+    if pd.isna(x):
+        return "ND"
+    try:
+        if isinstance(x, (int, np.integer)):
+            val = int(x)
+        elif isinstance(x, (float, np.floating)):
+            if np.isnan(x):
+                return "ND"
+            val = int(float(x))
+        else:
+            val = int(float(str(x).strip()))
+        if val == -1:
+            return "NA"
+        if val == 3:
+            return "ND"
+        if val in {0, 1, 2}:
+            return str(val)
+    except Exception:
+        pass
+    text = str(x).strip().upper()
+    if text in {"ND", "NA"}:
+        return text
+    return "ND"
+
+
+def normalize_token(x) -> str:
+    """Backward-compatible alias used by some helpers (maps to ICM/TE tokens)."""
+    return normalize_icm_te_token(x)
 
 
 def assert_valid_labels(
@@ -115,24 +148,27 @@ def print_label_distribution(
     print(f"\n[{split}] Label distribution for task={task}")
 
     if task == "exp":
-        counts = df[label_col].value_counts().sort_index()
+        raw_vals = df[label_col].dropna().astype(str).str.strip()
+        raw_unique = sorted({val if val != "" else "<EMPTY>" for val in raw_vals.unique()})
+        print(f"{label_col} raw unique values: {raw_unique}")
+        tokens = df[label_col].apply(normalize_exp_token)
+        counts = tokens.value_counts().sort_index()
+        valid = counts.loc[[str(i) for i in range(5)]].sum() if not counts.empty else 0
+        na = counts.get("NA", 0)
+        print(f"EXP tokens: total={len(tokens)}, valid(0-4)={valid}, NA={na}")
         print("EXP counts:", counts.to_dict())
     else:
-        tokens = df[label_col].apply(normalize_token)
+        raw_vals = df[label_col].fillna("").astype(str).str.strip()
+        raw_unique = sorted({val if val != "" else "<EMPTY>" for val in raw_vals.unique()})
+        tokens = df[label_col].apply(normalize_icm_te_token)
         total = len(tokens)
         valid = tokens.isin(["0", "1", "2"]).sum()
         nd = (tokens == "ND").sum()
         na = (tokens == "NA").sum()
-        empty = (tokens == "").sum()
-
-        print(
-            f"{label_col}: total={total}, "
-            f"valid(0/1/2)={valid}, ND={nd}, NA={na}, empty={empty}"
-        )
-
-        if valid > 0:
-            valid_counts = tokens[tokens.isin(["0", "1", "2"])].value_counts().sort_index()
-            print("Valid distribution:", valid_counts.to_dict())
+        print(f"{label_col} raw unique values: {raw_unique}")
+        print(f"{label_col}: total={total}, valid(0/1/2)={valid}, ND={nd}, NA={na}")
+        valid_counts = tokens[tokens.isin(["0", "1", "2"])].value_counts().sort_index()
+        print("Valid distribution:", valid_counts.to_dict())
 
 
 # ============================================================

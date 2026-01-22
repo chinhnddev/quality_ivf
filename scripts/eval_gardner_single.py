@@ -26,8 +26,9 @@ from sklearn.metrics import (
 )
 
 from src.dataset import GardnerDataset
-from src.model import IVF_EffiMorphPP
 from src.loss_coral import coral_predict_class
+from src.model import IVF_EffiMorphPP
+from src.utils import normalize_exp_token, normalize_icm_te_token
 
 
 def set_seed(seed: int) -> None:
@@ -51,6 +52,9 @@ def load_state_dict_robust(ckpt_path: str, device: torch.device) -> dict:
         if k2.startswith("module."):
             k2 = k2[len("module.") :]
         new_state[k2] = v
+    if "n_averaged" in new_state:
+        new_state.pop("n_averaged", None)
+        print("[SWA] Dropped 'n_averaged' key from checkpoint before loading.")
     return new_state
 
 
@@ -74,42 +78,13 @@ def _to_int_or_none(x: str) -> Optional[int]:
 
 
 def map_exp_gold_value(v: str) -> int:
-    """
-    Their logic:
-    - EXP valid: 0..4
-    - NA/empty/invalid -> 5 (not assessable)
-    """
-    s = str(v).strip()
-    if s == "" or s.lower() == "nan":
-        return 5
-    s = s.replace("NA", "-1").replace("ND", "5")
-    try:
-        iv = int(float(s))
-    except Exception:
-        return 5
-    return iv if iv in [0, 1, 2, 3, 4] else 5
+    token = normalize_exp_token(v)
+    return int(token) if token in {"0", "1", "2", "3", "4"} else 5
 
 
 def map_icm_te_gold_value(v: str) -> int:
-    """
-    Their logic:
-    - ICM/TE valid: 0..2
-    - ND -> 3
-    - NA/empty/invalid -> 3 (not assessable bucket)
-    """
-    s = str(v).strip()
-    if s == "" or s.lower() == "nan":
-        return 3
-    s = s.replace("NA", "-1").replace("ND", "3")
-
-    # Accept A/B/C if your gold file uses letters (defensive)
-    s = s.replace("A", "0").replace("B", "1").replace("C", "2")
-
-    try:
-        iv = int(float(s))
-    except Exception:
-        return 3
-    return iv if iv in [0, 1, 2] else 3
+    token = normalize_icm_te_token(v)
+    return int(token) if token in {"0", "1", "2"} else 3
 
 
 def map_pred_icm_te(v: int) -> int:
@@ -120,6 +95,35 @@ def map_pred_icm_te(v: int) -> int:
 def map_pred_exp(v: int) -> int:
     # If prediction is not 0..4 -> map to 5
     return v if v in [0, 1, 2, 3, 4] else 5
+
+
+def _normalize_exp_prediction(value) -> Optional[int]:
+    if pd.isna(value):
+        return None
+    try:
+        candidate = int(float(value))
+    except Exception:
+        return None
+    return map_pred_exp(candidate)
+
+
+def extract_predicted_exp_series(preds_df: pd.DataFrame) -> Optional[pd.Series]:
+    candidates = [
+        "EXP_pred",
+        "exp_pred",
+        "pred_EXP",
+        "pred_exp",
+        "y_pred_exp",
+        "y_pred_EXP",
+        "EXP_pred_raw",
+        "exp_pred_raw",
+    ]
+    for col in candidates:
+        if col in preds_df.columns:
+            series = preds_df[col].apply(_normalize_exp_prediction)
+            series.name = col
+            return series
+    return None
 
 
 DEFAULT_CORAL_THR = 0.5
@@ -173,6 +177,8 @@ def main():
                         help=f"Uniform CORAL threshold for EXP (default {DEFAULT_CORAL_THR}).")
     parser.add_argument("--auto_thr", type=int, choices=[0, 1], default=1,
                         help="Automatically load tuned CORAL threshold when --coral_thr is not provided.")
+    parser.add_argument("--authors_filter_exp01_for_icm_te", type=int, choices=[0, 1], default=1,
+                        help="When evaluating ICM/TE, skip samples where either EXP_gt or EXP_pred is in {0,1}.")
     parser.add_argument("--coral_thr_last", type=float, default=None)
     args = parser.parse_args()
 
@@ -292,6 +298,7 @@ def main():
         raise RuntimeError(f"Missing predictions for {missing} rows after merge by Image.")
 
     preds_df["y_pred_raw"] = preds_df["y_pred_raw"].astype(int)
+    exp_pred_series = extract_predicted_exp_series(preds_df)
 
     # --------------------------
     # Build y_true/y_pred EXACTLY like authors
@@ -316,10 +323,31 @@ def main():
     else:
         # Evaluate ICM/TE only when EXP_gt not in [0,1]
         col = task.upper()
-        for _, r in preds_df.iterrows():
+        exp_pred_label = exp_pred_series.name if exp_pred_series is not None else None
+        if exp_pred_label:
+            print(f"[ICM/TE] Filtering using predicted EXP column '{exp_pred_label}'.")
+        raw_series = preds_df[col].fillna("").astype(str).str.strip()
+        raw_unique = sorted({val if val != "" else "<EMPTY>" for val in raw_series.unique()})
+        raw_numeric = pd.to_numeric(preds_df[col], errors="coerce")
+        na_raw_count = int((raw_numeric == -1).sum())
+        nd_raw_count = int((raw_numeric == 3).sum())
+        mapped_counts = Counter(map_icm_te_gold_value(v) for v in preds_df[col])
+        print(f"[ICM/TE GOLD] Raw label values: {raw_unique}")
+        if na_raw_count:
+            print(f"[ICM/TE GOLD] Raw '-1' (NA) occurrences={na_raw_count} -> mapped to class 3.")
+        if nd_raw_count:
+            print(f"[ICM/TE GOLD] Raw '3' (ND) occurrences={nd_raw_count} -> mapped to class 3.")
+        print(f"[ICM/TE GOLD] Mapped label counts: {dict(sorted(mapped_counts.items()))}")
+        filter_by_exp = bool(args.authors_filter_exp01_for_icm_te)
+        if filter_by_exp and exp_pred_label:
+            print("[ICM/TE] Applying authors exp {0,1} filter.")
+        for idx, r in preds_df.iterrows():
             exp_gt = map_exp_gold_value(r["EXP"])
-            if exp_gt in [0, 1]:
+            if filter_by_exp and exp_gt in [0, 1]:
                 continue  # not defined for ICM/TE per authors
+            exp_pred = exp_pred_series.loc[idx] if exp_pred_series is not None else None
+            if filter_by_exp and exp_pred in [0, 1]:
+                continue
             gt = map_icm_te_gold_value(r[col])
             pr = map_pred_icm_te(int(r["y_pred_raw"]))
             y_true.append(gt)

@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import CORAL functions
 from src.loss_coral import coral_loss, coral_predict_class
+from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_distribution
 
 
 # =========================
@@ -69,28 +70,6 @@ def set_seed(seed: int, deterministic: bool = True) -> None:
 
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
-
-
-def normalize_token(x) -> str:
-    """Normalize label tokens for ICM/TE to one of: '0','1','2','ND','NA',''."""
-    if pd.isna(x):
-        return ""
-    if isinstance(x, (int, np.integer)):
-        return str(int(x))
-    if isinstance(x, (float, np.floating)):
-        if float(x).is_integer():
-            return str(int(x))
-        return str(x)
-    s = str(x).strip()
-    if s == "":
-        return ""
-    s_up = s.upper()
-    if s_up in {"ND", "NA"}:
-        return s_up
-    # allow numeric strings
-    if s in {"0", "1", "2", "3", "4"}:
-        return s
-    return s  # fallback
 
 
 def compute_class_weights(labels: List[int], num_classes: int, eps: float = 1e-8) -> torch.Tensor:
@@ -194,20 +173,20 @@ class GardnerDataset(Dataset):
         if image_col not in df.columns or label_col not in df.columns:
             raise ValueError(f"CSV missing required columns. Need {image_col} and {label_col}. Got: {df.columns.tolist()}")
 
-        # Normalize EXP to int where possible; normalize ICM/TE tokens
+        df["Image"] = df["Image"].astype(str).str.strip()
         if label_col == "EXP":
-            df["EXP"] = pd.to_numeric(df["EXP"], errors="raise").astype(int)
+            df["norm_label"] = df["EXP"].apply(normalize_exp_token)
         else:
-            df[label_col] = df[label_col].apply(normalize_token)
+            df["norm_label"] = df[label_col].apply(normalize_icm_te_token)
 
         # Filtering rule:
         # - train/val: filter for ICM/TE valid labels {0,1,2}; EXP keeps all
         # - test: do NOT filter (load all); masking is for eval script
         if split in {"train", "val"}:
             if label_col == "EXP":
-                df = df[df["EXP"].isin([0, 1, 2, 3, 4])].copy()
+                df = df[df["norm_label"].isin({"0", "1", "2", "3", "4"})].copy()
             else:
-                df = df[df[label_col].isin(["0", "1", "2"])].copy()
+                df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
         elif split == "test":
             pass
         else:
@@ -264,32 +243,9 @@ class GardnerDataset(Dataset):
         img = Image.open(img_path).convert("RGB")
         x = self.transform(img)
 
-        if self.label_col == "EXP":
-            y = int(row["EXP"])
-        else:
-            # train/val already filtered to "0","1","2"
-            y = int(row[self.label_col])
+        y = int(row["norm_label"])
 
         return x, y, img_name
-
-
-def print_label_summary(df: pd.DataFrame, task: str, label_col: str, split_name: str) -> None:
-    print(f"\n[{split_name}] label summary task={task} label_col={label_col}")
-    if label_col == "EXP":
-        counts = df["EXP"].value_counts().sort_index()
-        print("EXP distribution:", counts.to_dict())
-    else:
-        col = label_col
-        tokens = df[col].apply(normalize_token)
-        total = len(tokens)
-        valid = tokens.isin(["0", "1", "2"]).sum()
-        nd = (tokens == "ND").sum()
-        na = (tokens == "NA").sum()
-        empty = (tokens == "").sum()
-        print(f"{col}: total={total}, valid(0/1/2)={valid}, ND={nd}, NA={na}, empty={empty}")
-        if valid > 0:
-            valid_counts = tokens[tokens.isin(["0", "1", "2"])].value_counts().sort_index()
-            print(f"{col} valid distribution:", valid_counts.to_dict())
 
 
 # =========================
@@ -416,8 +372,8 @@ def train_one_run(cfg, args) -> None:
     raw_train_df = pd.read_csv(train_csv)
     raw_val_df = pd.read_csv(val_csv)
     if cfg.sanity_checks.print_label_distribution:
-        print_label_summary(raw_train_df, task, label_col, "train.csv (raw)")
-        print_label_summary(raw_val_df, task, label_col, "val.csv (raw)")
+        print_label_distribution(raw_train_df, label_col, task, "train.csv (raw)")
+        print_label_distribution(raw_val_df, label_col, task, "val.csv (raw)")
 
     # Build datasets (train/val filtered properly)
     # If sanity test is requested, create datasets with sanity_mode=True (deterministic transforms)
