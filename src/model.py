@@ -159,7 +159,7 @@ class SeparableConvBlock(nn.Module):
         self.simam = SimAM(out_channels)
         self.use_res = stride == 1 and in_channels == out_channels
         if not self.use_res:
-            self.proj = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+            self.proj = nn.Conv2d(in_channels, out_channels, 1, stride=stride, bias=False)
 
     def forward(self, x):
         identity = x
@@ -168,7 +168,9 @@ class SeparableConvBlock(nn.Module):
         x = self.simam(x)
         if self.use_res:
             return x + identity
-        return x + self.proj(identity)
+        proj_skip = self.proj(identity)
+        assert x.shape == proj_skip.shape, f"SWA downsample mismatch {x.shape} vs {proj_skip.shape}"
+        return x + proj_skip
 
 
 class TransformerEncoderBlock(nn.Module):
