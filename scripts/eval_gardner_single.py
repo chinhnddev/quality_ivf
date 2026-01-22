@@ -19,6 +19,8 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
+    precision_score,
+    recall_score,
     precision_recall_fscore_support,
     confusion_matrix,
 )
@@ -122,8 +124,8 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--splits_dir", type=str, required=True, help="Directory containing {val,test}.csv")
     parser.add_argument("--out_dir", type=str, required=True, help="Output directory for metrics and preds")
-    parser.add_argument("--split", type=str, default="test", choices=["test", "val"],
-                        help="Split to evaluate: test or val (default: test)")
+    parser.add_argument("--split", type=str, default="gold_test", choices=["gold_test"],
+                        help="Split to evaluate: gold_test (default: gold_test)")
     parser.add_argument("--img_dir", type=str, default="data/blastocyst_Dataset/Images",
                         help="Directory containing blastocyst images")
     parser.add_argument("--batch_size", type=int, default=64)
@@ -311,12 +313,20 @@ def main():
     y_pred = [int(preds_df.loc[i, "y_pred"]) for i in valid_pos]
 
     acc = accuracy_score(y_true, y_pred)
-    macro_f1 = f1_score(y_true, y_pred, average="macro")
-    weighted_f1 = f1_score(y_true, y_pred, average="weighted")
+    avg_prec = precision_score(y_true, y_pred, average="weighted", zero_division=0)
+    avg_rec = recall_score(y_true, y_pred, average="weighted", zero_division=0)
+    avg_f1 = f1_score(y_true, y_pred, average="weighted", zero_division=0)
     precision, recall, f1, support = precision_recall_fscore_support(
         y_true, y_pred, average=None, zero_division=0
     )
     cm = confusion_matrix(y_true, y_pred)
+
+    # Safety check: log class counts
+    y_true_counts = Counter(y_true)
+    print(f"y_true class counts after filtering: {dict(y_true_counts)}")
+    for cls in range(num_classes):
+        if y_true_counts.get(cls, 0) == 0:
+            print(f"WARNING: Class {cls} has 0 support in gold_test set")
 
     # y_pred distribution full (0..K-1)
     counts = Counter(y_pred)
@@ -341,8 +351,9 @@ def main():
         "n_total_split_rows": int(len(split_df)),
         "n_eval_used": int(len(y_true)),
         "accuracy": float(acc),
-        "macro_f1": float(macro_f1),
-        "weighted_f1": float(weighted_f1),
+        "avg-prec": float(avg_prec),
+        "avg-rec": float(avg_rec),
+        "avg-f1": float(avg_f1),
         "per_class_precision": precision.tolist(),
         "per_class_recall": recall.tolist(),
         "per_class_f1": f1.tolist(),
@@ -365,8 +376,8 @@ def main():
     print(f"Saved metrics to: {os.path.abspath(metrics_file)}")
     print(f"Saved predictions to: {os.path.abspath(preds_file)}")
     print(
-        f"Evaluation complete | task={args.task} | split={args.split} | n_eval_used={len(y_true)} | "
-        f"Acc={acc:.4f} | MacroF1={macro_f1:.4f} | WeightedF1={weighted_f1:.4f}"
+        f"Evaluation complete | task={args.task} | split=gold_test | n_eval_used={len(y_true)} | "
+        f"accuracy={acc:.4f} | avg-prec={avg_prec:.4f} | avg-rec={avg_rec:.4f} | avg-f1={avg_f1:.4f}"
     )
 
 
