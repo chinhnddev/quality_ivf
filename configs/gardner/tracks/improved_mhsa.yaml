@@ -1,0 +1,9 @@
+track: improved_mhsa
+loss_name: conditional
+label_smoothing: 0.0
+focal_gamma: 2.0
+compute_class_weights_from_train: true
+model:
+  use_late_mhsa: true
+  mhsa_layers: 1
+  mhsa_heads: 4

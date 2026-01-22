@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
 
 
 # -------------------------
@@ -132,16 +133,105 @@ class DWConvBlock(nn.Module):
         return x
 
 
+class SeparableConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1, dilation=1):
+        super().__init__()
+        padding = dilation
+        self.dw = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                in_channels,
+                3,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=in_channels,
+                bias=False,
+            ),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.pw = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.simam = SimAM(out_channels)
+        self.use_res = stride == 1 and in_channels == out_channels
+        if not self.use_res:
+            self.proj = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+
+    def forward(self, x):
+        identity = x
+        x = self.dw(x)
+        x = self.pw(x)
+        x = self.simam(x)
+        if self.use_res:
+            return x + identity
+        return x + self.proj(identity)
+
+
+class TransformerEncoderBlock(nn.Module):
+    def __init__(self, dim, heads=4, mlp_ratio=4.0, dropout=0.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        hidden = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        residual = x
+        normed = self.norm1(x)
+        attn_out = self.attn(normed, normed, normed)[0]
+        x = residual + attn_out
+        residual = x
+        x = residual + self.mlp(self.norm2(x))
+        return x
+
+
+class LateMHSA(nn.Module):
+    def __init__(self, dim, layers=1, heads=4, mlp_ratio=4.0, dropout=0.0):
+        super().__init__()
+        assert layers >= 1, "mhsa_layers must be >= 1"
+        self.layers = nn.ModuleList(
+            [TransformerEncoderBlock(dim, heads=heads, mlp_ratio=mlp_ratio, dropout=dropout) for _ in range(layers)]
+        )
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        tokens = x.flatten(2).permute(0, 2, 1)  # (B, N, C)
+        for layer in self.layers:
+            tokens = layer(tokens)
+        out = tokens.mean(dim=1)
+        assert out.shape == (b, c)
+        return out
+
+
+class GeM(nn.Module):
+    def __init__(self, p=3.0, eps=1e-6):
+        super().__init__()
+        self.p = nn.Parameter(torch.ones(1) * p)
+        self.eps = eps
+
+    def forward(self, x):
+        x = x.clamp(min=self.eps).pow(self.p)
+        x = F.adaptive_avg_pool2d(x, 1)
+        return x.pow(1.0 / self.p)
+
+
 # -------------------------
 # IVF_EffiMorphPP
 # -------------------------
 class IVF_EffiMorphPP(nn.Module):
     """
-    Stable IVF_EffiMorphPP
-    - BN + Residual
-    - Concat fusion
-    - LayerNorm head (batch-size safe)
-    - Supports CORAL ordinal regression for EXP task
+    Stable IVF_EffiMorphPP with optional Xception and MHSA enhancements.
     """
 
     def __init__(
@@ -149,11 +239,20 @@ class IVF_EffiMorphPP(nn.Module):
         num_classes: int,
         dropout_p: float = 0.3,
         width_mult: float = 1.0,
+        depth_mult: float = 1.0,
         base_channels: int = 32,
         divisor: int = 8,
         eca_k: int = 5,
         task: str = "exp",
         use_coral: bool = False,
+        use_xception_mid: bool = False,
+        use_late_mhsa: bool = False,
+        mhsa_layers: int = 1,
+        mhsa_heads: int = 4,
+        use_gem: bool = False,
+        head_mlp: bool = False,
+        head_hidden_dim: Optional[int] = None,
+        head_dropout: float = 0.0,
     ):
         super().__init__()
 
@@ -173,7 +272,8 @@ class IVF_EffiMorphPP(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # Stages
+        stage_blocks = max(1, int(round(depth_mult)))
+
         self.stage1 = MultiScaleBlock(base, c1)
         self.stage1_down = nn.Sequential(
             nn.Conv2d(c1, c1, 3, stride=2, padding=1, bias=False),
@@ -181,9 +281,10 @@ class IVF_EffiMorphPP(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        self.stage2 = DWConvBlock(c1, c2, stride=2)
-        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=2)
-        self.stage4 = DWConvBlock(c3, c4, stride=2)
+        block_mid = SeparableConvBlock if use_xception_mid else DWConvBlock
+        self.stage2 = self._make_stage(block_mid, c1, c2, stage_blocks, stride=2)
+        self.stage3 = self._make_stage(block_mid, c2, c3, stage_blocks, stride=2, dilation=2)
+        self.stage4 = self._make_stage(DWConvBlock, c3, c4, stage_blocks, stride=2)
 
         # Fusion
         self.fusion = nn.Sequential(
@@ -193,21 +294,46 @@ class IVF_EffiMorphPP(nn.Module):
         )
         self.eca = ECA(c4, eca_k)
 
-        # Head
-        hidden = max(128, c4 // 2)
+        self.use_late_mhsa = use_late_mhsa
+        self.use_gem = use_gem
+        self.head_mlp = head_mlp
+
         self.gap = nn.AdaptiveAvgPool2d(1)
+        self.gem = GeM() if use_gem else None
         self.dropout = nn.Dropout(dropout_p)
 
-        # For CORAL ordinal regression on EXP task, output K-1 logits instead of K
-        # CORAL uses K-1 thresholds for K classes (0 to K-1)
+        if use_late_mhsa:
+            self.mhsa = LateMHSA(c4, layers=max(1, mhsa_layers), heads=mhsa_heads)
+        else:
+            self.mhsa = None
+
+        mlp_hidden = int(head_hidden_dim) if head_hidden_dim is not None else max(128, c4 // 2)
+        if head_mlp:
+            self.head_mlp_block = nn.Sequential(
+                nn.Linear(c4, mlp_hidden),
+                nn.ReLU(inplace=True),
+                nn.Dropout(head_dropout),
+                nn.Linear(mlp_hidden, c4),
+            )
+        else:
+            self.head_mlp_block = nn.Identity()
+
         output_dim = num_classes - 1 if (task == "exp" and use_coral) else num_classes
         self.head = nn.Sequential(
-            nn.Linear(c4, hidden),
-            nn.LayerNorm(hidden),
+            nn.Linear(c4, mlp_hidden),
+            nn.LayerNorm(mlp_hidden),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout_p * 0.5),
-            nn.Linear(hidden, output_dim),
+            nn.Linear(mlp_hidden, output_dim),
         )
+
+    def _make_stage(self, block_cls, in_channels, out_channels, blocks, stride=2, dilation=1):
+        layers = []
+        for idx in range(blocks):
+            s = stride if idx == 0 else 1
+            dil = dilation if idx == 0 else 1
+            layers.append(block_cls(in_channels if idx == 0 else out_channels, out_channels, stride=s, dilation=dil))
+        return nn.Sequential(*layers)
 
     def forward(self, x):
         x = self.stem(x)
@@ -225,7 +351,16 @@ class IVF_EffiMorphPP(nn.Module):
         fused = self.fusion(fused)
         fused = self.eca(fused)
 
-        x = self.gap(fused).flatten(1)
+        if self.use_late_mhsa and self.mhsa is not None:
+            x = self.mhsa(fused)
+            if self.gem is not None:
+                gem_vec = self.gem(fused).flatten(1)
+                x = x + gem_vec
+        else:
+            pool = self.gem(fused) if self.gem is not None else self.gap(fused)
+            x = pool.flatten(1)
+
+        x = self.head_mlp_block(x)
         x = self.dropout(x)
         x = self.head(x)
         return x

@@ -405,8 +405,7 @@ def train_one_run(cfg, args) -> None:
     print("num_classes=", num_classes)
 
     # Collect train labels (after filtering) for class weights
-    train_labels = [int(ds_train.df[label_col].iloc[i]) if label_col == "EXP" else int(ds_train.df[label_col].iloc[i])
-                    for i in range(len(ds_train.df))]
+    train_labels = [int(ds_train.df["norm_label"].iloc[i]) for i in range(len(ds_train.df))]
 
     # Log class distribution
     from collections import Counter
@@ -478,18 +477,63 @@ def train_one_run(cfg, args) -> None:
     # In sanity_overfit mode, disable dropout for true overfit test
     dropout_p_value = 0.0 if args.sanity_overfit else float(cfg.model.dropout)
 
+    model_cfg = getattr(cfg, "model", {})
+    width_mult_cfg = float(getattr(model_cfg, "width_mult", 1.0))
+    depth_mult_cfg = float(getattr(model_cfg, "depth_mult", 1.0))
+    use_xception_mid_cfg = bool(getattr(model_cfg, "use_xception_mid", False))
+    use_late_mhsa_cfg = bool(getattr(model_cfg, "use_late_mhsa", False))
+    mhsa_layers_cfg = int(getattr(model_cfg, "mhsa_layers", 1))
+    mhsa_heads_cfg = int(getattr(model_cfg, "mhsa_heads", 4))
+    use_gem_cfg = bool(getattr(model_cfg, "use_gem", False))
+    head_mlp_cfg = bool(getattr(model_cfg, "head_mlp", False))
+    head_hidden_dim_cfg = getattr(model_cfg, "head_hidden_dim", None)
+    head_dropout_cfg = float(getattr(model_cfg, "head_dropout", 0.0))
+
+    def _build_model_instance():
+        return IVF_EffiMorphPP(
+            num_classes=num_classes,
+            dropout_p=dropout_p_value,
+            width_mult=width_mult_cfg,
+            depth_mult=depth_mult_cfg,
+            task=task,
+            use_coral=use_coral,
+            use_xception_mid=use_xception_mid_cfg,
+            use_late_mhsa=use_late_mhsa_cfg,
+            mhsa_layers=mhsa_layers_cfg,
+            mhsa_heads=mhsa_heads_cfg,
+            use_gem=use_gem_cfg,
+            head_mlp=head_mlp_cfg,
+            head_hidden_dim=head_hidden_dim_cfg,
+            head_dropout=head_dropout_cfg,
+        )
+
     # Sanity model scale preset
     if args.sanity_overfit:
         scale_mapping = {"small": 1.0, "base": 1.25, "large": 1.5}
         width_mult = scale_mapping[args.sanity_model_scale]
         # Auto-bump to 2.0 if params < 3M
-        temp_model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral)
+        temp_model = IVF_EffiMorphPP(
+            num_classes=num_classes,
+            dropout_p=dropout_p_value,
+            width_mult=width_mult,
+            depth_mult=depth_mult_cfg,
+            task=task,
+            use_coral=use_coral,
+            use_xception_mid=use_xception_mid_cfg,
+            use_late_mhsa=use_late_mhsa_cfg,
+            mhsa_layers=mhsa_layers_cfg,
+            mhsa_heads=mhsa_heads_cfg,
+            use_gem=use_gem_cfg,
+            head_mlp=head_mlp_cfg,
+            head_hidden_dim=head_hidden_dim_cfg,
+            head_dropout=head_dropout_cfg,
+        )
         total_params = sum(p.numel() for p in temp_model.parameters())
         if total_params < 3_000_000 and args.sanity_model_scale == "large":
             width_mult = 2.0
         model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral)
     else:
-        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, task=task, use_coral=use_coral)
+        model = _build_model_instance()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
@@ -715,8 +759,7 @@ def train_one_run(cfg, args) -> None:
         print("="*80 + "\n")
         
         # Reset model to fresh weights for actual training
-        from src.model import IVF_EffiMorphPP
-        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=float(cfg.model.dropout))
+        model = _build_model_instance()
         model.to(device)
         # Reinit optimizer with new model
         lr = float(cfg.optimizer.lr)
