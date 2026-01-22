@@ -84,7 +84,7 @@ def map_exp_gold_value(v: str) -> int:
         return 5
     s = s.replace("NA", "-1").replace("ND", "5")
     try:
-        iv = int(s)
+        iv = int(float(s))
     except Exception:
         return 5
     return iv if iv in [0, 1, 2, 3, 4] else 5
@@ -106,7 +106,7 @@ def map_icm_te_gold_value(v: str) -> int:
     s = s.replace("A", "0").replace("B", "1").replace("C", "2")
 
     try:
-        iv = int(s)
+        iv = int(float(s))
     except Exception:
         return 3
     return iv if iv in [0, 1, 2] else 3
@@ -120,6 +120,37 @@ def map_pred_icm_te(v: int) -> int:
 def map_pred_exp(v: int) -> int:
     # If prediction is not 0..4 -> map to 5
     return v if v in [0, 1, 2, 3, 4] else 5
+
+
+DEFAULT_CORAL_THR = 0.5
+
+
+def find_automatic_coral_threshold(checkpoint: Path, out_dir: Path) -> Optional[float]:
+    candidates = []
+    if checkpoint:
+        candidates.append(checkpoint.parent)
+    if out_dir:
+        candidates.append(out_dir)
+    seen = set()
+    for root in candidates:
+        if root in seen or not root:
+            continue
+        seen.add(root)
+        thr_path = root / "best_coral_threshold.json"
+        if not thr_path.exists():
+            continue
+        try:
+            with thr_path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+            thr_value = payload.get("best_coral_thr")
+            if thr_value is None:
+                continue
+            thr_value = float(thr_value)
+            print(f"[AUTO CORAL] Loaded tuned threshold {thr_value:.4f} from {thr_path}")
+            return thr_value
+        except Exception as exc:
+            print(f"[AUTO CORAL] Failed to read {thr_path}: {exc}")
+    return None
 
 
 def main():
@@ -138,7 +169,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_strict", action="store_true")
     parser.add_argument("--use_coral", type=int, default=0)
-    parser.add_argument("--coral_thr", type=float, default=0.5)
+    parser.add_argument("--coral_thr", type=float, default=None,
+                        help=f"Uniform CORAL threshold for EXP (default {DEFAULT_CORAL_THR}).")
+    parser.add_argument("--auto_thr", type=int, choices=[0, 1], default=1,
+                        help="Automatically load tuned CORAL threshold when --coral_thr is not provided.")
     parser.add_argument("--coral_thr_last", type=float, default=None)
     args = parser.parse_args()
 
@@ -179,6 +213,16 @@ def main():
             print("[INFO] Checkpoint has 4 outputs; auto-enabling CORAL")
             use_coral_flag = True
 
+    user_provided_thr = args.coral_thr is not None
+    coral_thr_value = args.coral_thr if user_provided_thr else DEFAULT_CORAL_THR
+    auto_thr_enabled = bool(args.auto_thr)
+    if use_coral_flag and args.task == "exp" and auto_thr_enabled and not user_provided_thr:
+        auto_thr = find_automatic_coral_threshold(Path(args.checkpoint), Path(args.out_dir))
+        if auto_thr is not None:
+            coral_thr_value = auto_thr
+        else:
+            print(f"[AUTO CORAL] No tuned threshold found; falling back to default {coral_thr_value:.2f}")
+
     model = IVF_EffiMorphPP(train_num_classes, task=args.task, use_coral=use_coral_flag).to(device)
     strict = not args.no_strict
     model.load_state_dict(state_dict, strict=strict)
@@ -192,10 +236,10 @@ def main():
             out = model(dummy)
             assert out.shape[1] == 4, f"Expected 4 CORAL logits, got {out.shape[1]}"
         if args.coral_thr_last is not None:
-            coral_thresholds = [args.coral_thr, args.coral_thr, args.coral_thr, args.coral_thr_last]
+            coral_thresholds = [coral_thr_value, coral_thr_value, coral_thr_value, args.coral_thr_last]
             print(f"[CORAL] Using per-threshold decoding: {coral_thresholds}")
         else:
-            coral_thresholds = args.coral_thr
+            coral_thresholds = coral_thr_value
             print(f"[CORAL] Using uniform threshold: {coral_thresholds}")
 
     # Predict

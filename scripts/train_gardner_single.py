@@ -16,6 +16,7 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 from sklearn.metrics import f1_score, accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 from torchvision import transforms
 from PIL import Image
 
@@ -328,6 +329,54 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
     }
 
 
+def collect_coral_logits(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    model.eval()
+    logits_acc, label_acc = [], []
+    with torch.no_grad():
+        for batch in loader:
+            if len(batch) == 4:
+                x, y, _, _ = batch
+            else:
+                x, y, _ = batch
+            x = x.to(device)
+            logits = model(x)
+            logits_acc.append(logits.detach().cpu())
+            label_acc.append(y.detach().cpu())
+    if not logits_acc:
+        return torch.empty((0, 4)), torch.empty((0,), dtype=torch.long)
+    return torch.cat(logits_acc, dim=0), torch.cat(label_acc, dim=0)
+
+
+def tune_coral_threshold(model: nn.Module, loader: DataLoader, device: torch.device, thr_min: float, thr_max: float, thr_step: float) -> Optional[Dict]:
+    logits, labels = collect_coral_logits(model, loader, device)
+    if logits.numel() == 0:
+        print("[CORAL TUNING] No validation logits collected; skipping threshold search.")
+        return None
+    thr_min = float(thr_min)
+    thr_max = float(thr_max)
+    thr_step = float(thr_step)
+    if thr_step <= 0 or thr_min > thr_max:
+        print("[CORAL TUNING] Invalid threshold search range; skipping.")
+        return None
+    thr_values = np.arange(thr_min, thr_max + 1e-8, thr_step)
+    best = None
+    grid = []
+    y_true = labels.numpy()
+    for thr in thr_values:
+        preds = coral_predict_class(logits, thresholds=float(thr)).cpu().numpy()
+        f1 = f1_score(y_true, preds, average="weighted", zero_division=0, labels=list(range(5)))
+        acc = accuracy_score(y_true, preds)
+        grid.append({"threshold": round(float(thr), 4), "val_f1_weighted": float(f1), "val_acc": float(acc)})
+        if best is None or f1 > best["f1"] or (
+            abs(f1 - best["f1"]) < 1e-8 and acc > best["acc"]
+        ):
+            best = {"thr": float(thr), "f1": float(f1), "acc": float(acc)}
+    if best is not None:
+        print(f"[CORAL TUNING] Best uniform threshold={best['thr']:.4f} | val_f1_weighted={best['f1']:.4f} | val_acc={best['acc']:.4f}")
+        return {"best_thr": best["thr"], "best_f1": best["f1"], "best_acc": best["acc"], "grid": grid}
+    return None
+
+
 def train_one_run(cfg, args) -> None:
     task = cfg.task
     track = cfg.track
@@ -546,9 +595,13 @@ def train_one_run(cfg, args) -> None:
                            use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode, use_weighted_sampler=use_weighted_sampler, use_coral=use_coral)
 
     # Optimizer / scheduler
-    lr = float(cfg.optimizer.lr)
-    wd = float(cfg.optimizer.weight_decay)
-    opt_name = getattr(cfg.optimizer, 'name', 'adam').lower()
+    optimizer_cfg = cfg.optimizer
+    scheduler_cfg = getattr(cfg, "scheduler", {})
+    swa_cfg = getattr(cfg, "swa", {})
+    coral_cfg = getattr(cfg, "coral_tuning", {})
+    lr = float(optimizer_cfg.lr)
+    wd = float(optimizer_cfg.weight_decay)
+    opt_name = getattr(optimizer_cfg, 'name', 'adam').lower()
     
     if opt_name == 'adamw':
         opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
@@ -558,8 +611,21 @@ def train_one_run(cfg, args) -> None:
         print(f"Using Adam optimizer: lr={lr}, weight_decay={wd}")
     
     epochs = int(cfg.train.epochs)
-    warmup_epochs = int(getattr(cfg.scheduler, 'warmup_epochs', 0))
-    print(f"LR schedule: cosine with warmup_epochs={warmup_epochs}")
+    warmup_epochs = int(getattr(scheduler_cfg, 'warmup_epochs', 0))
+    warmup_lr = float(getattr(scheduler_cfg, 'warmup_lr', 0.0))
+    warmup_scale = warmup_lr / lr if lr > 0 else 0.0
+    warmup_scale = min(max(warmup_scale, 0.0), 1.0)
+    use_swa = bool(getattr(swa_cfg, "use", False))
+    swa_start_epoch = int(getattr(swa_cfg, "start_epoch", epochs + 1))
+    swa_start_epoch = max(1, min(swa_start_epoch, epochs))
+    swa_lr = float(getattr(swa_cfg, "lr", lr))
+    tune_coral_thr = bool(getattr(coral_cfg, "tune", False))
+    thr_min = float(getattr(coral_cfg, "thr_min", 0.30))
+    thr_max = float(getattr(coral_cfg, "thr_max", 0.70))
+    thr_step = float(getattr(coral_cfg, "thr_step", 0.01))
+    print(f"LR schedule: cosine with warmup_epochs={warmup_epochs} warmup_lr={warmup_lr:.6f}")
+    print(f"SWA: use={use_swa} start_epoch={swa_start_epoch} swa_lr={swa_lr}")
+    print(f"CORAL tuning: enabled={tune_coral_thr} grid=[{thr_min},{thr_max}] step={thr_step}")
 
     best_metric = -1.0
     best_path = out_dir / "best.ckpt"
@@ -697,20 +763,28 @@ def train_one_run(cfg, args) -> None:
     
     def get_lr_scale(step: int) -> float:
         """Warmup + cosine annealing schedule."""
-        if step < warmup_steps:
-            return float(step) / float(max(1, warmup_steps))
-        else:
-            progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-            return 0.5 * (1.0 + np.cos(np.pi * progress))
+        if warmup_steps > 0 and step < warmup_steps:
+            progress = float(step) / float(max(1, warmup_steps))
+            return warmup_scale + (1.0 - warmup_scale) * progress
+        denom = max(1, total_steps - warmup_steps)
+        progress = float(step - warmup_steps) / denom
+        progress = min(max(progress, 0.0), 1.0)
+        return 0.5 * (1.0 + np.cos(np.pi * progress))
     
     # Create a lambda scheduler
     scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=get_lr_scale)
+    swa_model = AveragedModel(model) if use_swa else None
+    swa_scheduler = SWALR(opt, swa_lr=swa_lr) if use_swa else None
+    if use_swa:
+        swa_model.to(device)
+        print(f"[SWA] AveragedModel ready | swa_lr={swa_lr} | start_epoch={swa_start_epoch}")
 
     # Training loop (simple)
     for epoch in range(1, epochs + 1):
         model.train()
         running = 0.0
         n = 0
+        scheduler_active = not (use_swa and epoch >= swa_start_epoch)
         for batch in dl_train:
             if len(batch) == 4:
                 x, y, _, _ = batch
@@ -723,7 +797,8 @@ def train_one_run(cfg, args) -> None:
             loss = loss_fn(logits, y)
             loss.backward()
             opt.step()
-            scheduler.step()  # Update LR after each batch
+            if scheduler_active:
+                scheduler.step()  # Update LR after each batch
             running += loss.item() * x.size(0)
             n += x.size(0)
 
@@ -746,6 +821,46 @@ def train_one_run(cfg, args) -> None:
             with open(metrics_val_path, "w", encoding="utf-8") as f:
                 json.dump({"best_epoch": epoch, "best_val": val_metrics}, f, indent=2)
             print(f"  ✓ Saved best to {best_path} (monitor={best_metric:.4f})")
+        if use_swa and epoch >= swa_start_epoch:
+            swa_model.update_parameters(model)
+            swa_scheduler.step()
+
+    # SWA finalization / CORAL tuning
+    swa_ckpt_path = out_dir / "best_swa.ckpt"
+    threshold_json_path = out_dir / "best_coral_threshold.json"
+    swa_val_metrics = None
+    eval_model = swa_model if use_swa else model
+
+    if use_swa:
+        print("[SWA] Updating BatchNorm statistics for averaged weights...")
+        update_bn(dl_train, swa_model, device=device)
+        torch.save({
+            "state_dict": swa_model.state_dict(),
+            "task": task,
+            "track": track,
+            "num_classes": num_classes,
+            "label_col": label_col,
+            "swa": True
+        }, swa_ckpt_path)
+        print(f"[SWA] Saved averaged checkpoint to {swa_ckpt_path}")
+        swa_val_metrics = evaluate_on_val(swa_model, dl_val, device, use_coral)
+        print(f"[SWA VAL] acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}")
+
+    threshold_result = None
+    if task == "exp" and use_coral and tune_coral_thr:
+        threshold_result = tune_coral_threshold(eval_model, dl_val, device, thr_min, thr_max, thr_step)
+        if threshold_result:
+            threshold_payload = {
+                "best_coral_thr": threshold_result["best_thr"],
+                "metric": {
+                    "val_f1_weighted": threshold_result["best_f1"],
+                    "val_acc": threshold_result["best_acc"],
+                },
+                "grid": threshold_result["grid"],
+            }
+            with open(threshold_json_path, "w", encoding="utf-8") as f:
+                json.dump(threshold_payload, f, indent=2)
+            print(f"[CORAL TUNING] Saved tuned threshold to {threshold_json_path}")
 
     # Write debug report
     debug_report_path = out_dir / "debug_report.txt"
@@ -760,6 +875,11 @@ def train_one_run(cfg, args) -> None:
             f.write(f"Class weights tensor: {weights.tolist()}\n")
         f.write(f"WeightedRandomSampler used: {use_weighted_sampler}\n")
         f.write(f"Current LR value: {opt.param_groups[0]['lr']:.6f}\n")
+        if swa_val_metrics is not None:
+            f.write(f"SWA val metrics: acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}\n")
+        if threshold_result is not None:
+            f.write(f"Best tuned coral threshold: {threshold_result['best_thr']:.4f}\n")
+            f.write(f"Threshold f1/acc: {threshold_result['best_f1']:.4f}/{threshold_result['best_acc']:.4f}\n")
 
         # Check for majority-class collapse
         max_ratio = max(val_metrics['y_pred_ratios'].values())
@@ -769,6 +889,8 @@ def train_one_run(cfg, args) -> None:
     print(f"\nDone. Best val macro_f1 = {best_metric:.4f}")
     print(f"Artifacts: {out_dir}")
     print(f"Debug report: {debug_report_path}")
+    if use_swa:
+        print(f"SWA checkpoint: {swa_ckpt_path}")
 
 
 # =========================
@@ -800,6 +922,17 @@ def main():
     parser.add_argument("--use_class_weights", type=int, default=None)
     parser.add_argument("--use_weighted_sampler", type=int, default=0, help="Use WeightedRandomSampler for training (0=OFF, 1=ON)")
     parser.add_argument("--use_coral", type=int, default=0, help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
+
+    parser.add_argument("--lr", type=float, default=None, help="Base learning rate (paper default 5e-4).")
+    parser.add_argument("--warmup_lr", type=float, default=None, help="Warmup learning rate (paper default 1e-6).")
+    parser.add_argument("--warmup_epochs", type=int, default=None, help="Warmup epochs (paper default 5).")
+    parser.add_argument("--use_swa", type=int, choices=[0, 1], default=None, help="Enable SWA training (paper default 1).")
+    parser.add_argument("--swa_start_epoch", type=int, default=None, help="Epoch to start SWA averaging (paper default 30).")
+    parser.add_argument("--swa_lr", type=float, default=None, help="SWA learning rate (paper default 2.5e-4).")
+    parser.add_argument("--tune_coral_thr", type=int, choices=[0, 1], default=None, help="Tune CORAL threshold on val (paper default 1).")
+    parser.add_argument("--thr_min", type=float, default=None, help="Minimum CORAL threshold for tuning (paper default 0.30).")
+    parser.add_argument("--thr_max", type=float, default=None, help="Maximum CORAL threshold for tuning (paper default 0.70).")
+    parser.add_argument("--thr_step", type=float, default=None, help="CORAL threshold tuning step size (paper default 0.01).")
     parser.add_argument("--sanity_overfit", action="store_true",
                         help="Run sanity overfit test on a tiny subset then exit (fail-fast).")
 
@@ -826,6 +959,13 @@ def main():
 
     cfg = load_and_merge_cfg(args.config, args.task_cfg, args.track_cfg)
 
+    if "scheduler" not in cfg:
+        cfg.scheduler = OmegaConf.create({})
+    if "swa" not in cfg:
+        cfg.swa = OmegaConf.create({})
+    if "coral_tuning" not in cfg:
+        cfg.coral_tuning = OmegaConf.create({})
+
     # Apply CLI overrides if provided
     if args.splits_dir is not None:
         cfg.splits_dir = args.splits_dir
@@ -847,6 +987,26 @@ def main():
         cfg.use_class_weights = bool(args.use_class_weights)
     if args.use_weighted_sampler is not None:
         cfg.use_weighted_sampler = bool(args.use_weighted_sampler)
+    if args.lr is not None:
+        cfg.optimizer.lr = args.lr
+    if args.warmup_lr is not None:
+        cfg.scheduler.warmup_lr = args.warmup_lr
+    if args.warmup_epochs is not None:
+        cfg.scheduler.warmup_epochs = args.warmup_epochs
+    if args.use_swa is not None:
+        cfg.swa.use = bool(args.use_swa)
+    if args.swa_start_epoch is not None:
+        cfg.swa.start_epoch = args.swa_start_epoch
+    if args.swa_lr is not None:
+        cfg.swa.lr = args.swa_lr
+    if args.tune_coral_thr is not None:
+        cfg.coral_tuning.tune = bool(args.tune_coral_thr)
+    if args.thr_min is not None:
+        cfg.coral_tuning.thr_min = args.thr_min
+    if args.thr_max is not None:
+        cfg.coral_tuning.thr_max = args.thr_max
+    if args.thr_step is not None:
+        cfg.coral_tuning.thr_step = args.thr_step
 
     # Sanity: task/track must exist
     if "task" not in cfg or "track" not in cfg:

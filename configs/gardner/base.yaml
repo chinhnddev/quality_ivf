@@ -31,13 +31,24 @@ train:
 # Optimization (default; can be overridden by track config)
 optimizer:
   name: adamw
-  lr: 3.0e-4
+  lr: 5.0e-4
   weight_decay: 1.0e-4
 
 scheduler:
   name: cosine
-  warmup_epochs: 2
+  warmup_epochs: 5
+  warmup_lr: 0.000001
 
+swa:
+  use: true
+  start_epoch: 30
+  lr: 0.00025
+
+coral_tuning:
+  tune: true
+  thr_min: 0.30
+  thr_max: 0.70
+  thr_step: 0.01
 # Augmentation (applied ONLY during training)
 augmentation:
   random_resized_crop: true
