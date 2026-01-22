@@ -1,11 +1,35 @@
 import os
 import pandas as pd
 import torch
+from collections import Counter
 from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
 
 from .utils import normalize_exp_token, normalize_icm_te_token
+
+
+def parse_norm_label(label) -> int:
+    if pd.isna(label):
+        return -1
+    if isinstance(label, str):
+        txt = label.strip()
+        if txt == "" or txt.upper() in {"NA", "ND"}:
+            return -1
+        try:
+            return int(txt)
+        except ValueError:
+            try:
+                return int(float(txt))
+            except ValueError:
+                return -1
+    try:
+        return int(label)
+    except Exception:
+        try:
+            return int(float(label))
+        except Exception:
+            return -1
 
 
 class GardnerDataset(Dataset):
@@ -46,11 +70,13 @@ class GardnerDataset(Dataset):
 
         self.images = df["Image"].tolist()
 
+        self.labels_raw = df["norm_label"].tolist()
+        if self.split in {"test", "gold_test"}:
+            print(f"[DATASET] {self.task.upper()} {self.split} labels_raw counter: "
+                  f"{Counter(self.labels_raw)}")
         if self.task == "exp":
-            self.labels_raw = df["norm_label"].tolist()
-            self.labels = [int(lbl) for lbl in self.labels_raw]
+            self.labels = [parse_norm_label(lbl) for lbl in self.labels_raw]
         else:
-            self.labels_raw = df["norm_label"].tolist()
             mapping = {"0": 0, "1": 1, "2": 2}
             self.labels = [mapping.get(tok, -1) for tok in self.labels_raw]
 
