@@ -1,5 +1,6 @@
 # Data folder (large dataset)
 data/
+splits/
 
 # Python
 __pycache__/
