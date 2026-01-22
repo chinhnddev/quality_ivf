@@ -124,8 +124,8 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--splits_dir", type=str, required=True, help="Directory containing {val,test}.csv")
     parser.add_argument("--out_dir", type=str, required=True, help="Output directory for metrics and preds")
-    parser.add_argument("--split", type=str, default="gold_test", choices=["gold_test"],
-                        help="Split to evaluate: gold_test (default: gold_test)")
+    parser.add_argument("--split", type=str, default="test", choices=["test", "val"],
+                        help="Split to evaluate: test or val (default: test)")
     parser.add_argument("--img_dir", type=str, default="data/blastocyst_Dataset/Images",
                         help="Directory containing blastocyst images")
     parser.add_argument("--batch_size", type=int, default=64)
