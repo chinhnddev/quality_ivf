@@ -6,7 +6,7 @@ import json
 import random
 from pathlib import Path
 from collections import Counter
-from typing import Dict, Tuple, List
+from typing import List, Tuple, Optional
 
 # Add project root to sys.path
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,9 +18,9 @@ import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import (
     accuracy_score,
-    f1_score,
     precision_score,
     recall_score,
+    f1_score,
     precision_recall_fscore_support,
     confusion_matrix,
 )
@@ -35,22 +35,14 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
-    # reproducibility (may reduce speed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
 
 def load_state_dict_robust(ckpt_path: str, device: torch.device) -> dict:
     ckpt = torch.load(ckpt_path, map_location=device)
+    state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
 
-    # lightning-style: {"state_dict": ...}
-    if isinstance(ckpt, dict) and "state_dict" in ckpt:
-        state = ckpt["state_dict"]
-    else:
-        state = ckpt
-
-    # strip common prefixes
     new_state = {}
     for k, v in state.items():
         k2 = k
@@ -69,94 +61,98 @@ def normalize_labels_in_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _map_icm_te_to_012(series: pd.Series) -> pd.Series:
+# --------------------------
+# Match THEIR evaluation mapping
+# --------------------------
+def _to_int_or_none(x: str) -> Optional[int]:
+    if x is None:
+        return None
+    s = str(x).strip()
+    if s == "" or s.lower() == "nan":
+        return None
+    return int(s)
+
+
+def map_exp_gold_value(v: str) -> int:
     """
-    Accepts: "0/1/2", "A/B/C", "1/2/3"  -> returns normalized strings "0/1/2" (invalid stays as-is)
+    Their logic:
+    - EXP valid: 0..4
+    - NA/empty/invalid -> 5 (not assessable)
     """
-    s = series.astype(str).str.strip()
+    s = str(v).strip()
+    if s == "" or s.lower() == "nan":
+        return 5
+    s = s.replace("NA", "-1").replace("ND", "5")
+    try:
+        iv = int(s)
+    except Exception:
+        return 5
+    return iv if iv in [0, 1, 2, 3, 4] else 5
 
-    # A/B/C -> 0/1/2
-    s = s.replace({"A": "0", "B": "1", "C": "2"})
 
-    # 1/2/3 -> 0/1/2
-    s = s.replace({"1": "0", "2": "1", "3": "2"})
-
-    return s
-
-
-def build_valid_mask_and_ytrue(df: pd.DataFrame, task: str) -> Tuple[np.ndarray, List[int]]:
+def map_icm_te_gold_value(v: str) -> int:
     """
-    Returns:
-        valid_mask_np: np.ndarray bool [N] aligned with df row order
-        y_true_list: list[int] aligned with valid_mask positions (same order as df[valid_mask])
+    Their logic:
+    - ICM/TE valid: 0..2
+    - ND -> 3
+    - NA/empty/invalid -> 3 (not assessable bucket)
     """
-    task_u = task.upper()
+    s = str(v).strip()
+    if s == "" or s.lower() == "nan":
+        return 3
+    s = s.replace("NA", "-1").replace("ND", "3")
 
-    if task == "exp":
-        exp_num = pd.to_numeric(df["EXP"], errors="coerce")
-        valid_mask = exp_num.isin([0, 1, 2, 3, 4]).to_numpy()
-        y_true = exp_num[valid_mask].astype(int).tolist()
-        return valid_mask, y_true
+    # Accept A/B/C if your gold file uses letters (defensive)
+    s = s.replace("A", "0").replace("B", "1").replace("C", "2")
 
-    # icm/te
-    col = task_u
-    s = _map_icm_te_to_012(df[col])
-    valid_mask = s.isin(["0", "1", "2"]).to_numpy()
-    y_true = s[valid_mask].astype(int).tolist()
-    return valid_mask, y_true
+    try:
+        iv = int(s)
+    except Exception:
+        return 3
+    return iv if iv in [0, 1, 2] else 3
 
 
-def build_encoded_ytrue_column(df: pd.DataFrame, task: str) -> np.ndarray:
-    """
-    y_true encoded aligned to df rows; invalid label -> -1
-    """
-    y_true_encoded = np.full(len(df), -1, dtype=int)
-    valid_mask, y_true_list = build_valid_mask_and_ytrue(df, task)
-    if valid_mask.any():
-        y_true_encoded[valid_mask] = np.array(y_true_list, dtype=int)
-    return y_true_encoded
+def map_pred_icm_te(v: int) -> int:
+    # If prediction is not 0/1/2 -> map to 3
+    return v if v in [0, 1, 2] else 3
+
+
+def map_pred_exp(v: int) -> int:
+    # If prediction is not 0..4 -> map to 5
+    return v if v in [0, 1, 2, 3, 4] else 5
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate IVF-EffiMorphPP on Gardner split (val/test)")
-    parser.add_argument("--task", type=str, required=True, choices=["exp", "icm", "te"],
-                        help="Task to evaluate: exp, icm, or te")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
-    parser.add_argument("--splits_dir", type=str, required=True, help="Directory containing {val,test}.csv")
-    parser.add_argument("--out_dir", type=str, required=True, help="Output directory for metrics and preds")
+    parser = argparse.ArgumentParser(
+        description="Evaluate IVF-EffiMorphPP on Gardner split, using the SAME evaluation logic as authors."
+    )
+    parser.add_argument("--task", type=str, required=True, choices=["exp", "icm", "te"])
+    parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--splits_dir", type=str, required=True)
+    parser.add_argument("--out_dir", type=str, required=True)
     parser.add_argument("--split", type=str, default="test", choices=["test", "val"],
                         help="Split to evaluate: test or val (default: test)")
-    parser.add_argument("--img_dir", type=str, default="data/blastocyst_Dataset/Images",
-                        help="Directory containing blastocyst images")
+    parser.add_argument("--img_dir", type=str, default="data/blastocyst_Dataset/Images")
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=2)  # safer on colab
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--no_strict", action="store_true",
-                        help="Disable strict load_state_dict (allow missing/extra keys)")
-    parser.add_argument("--use_coral", type=int, default=0,
-                        help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
-    parser.add_argument("--coral_thr", type=float, default=0.5,
-                        help="Decision threshold for CORAL ordinal regression (default: 0.5)")
-    parser.add_argument("--coral_thr_last", type=float, default=None,
-                        help="Override threshold for the last CORAL logit (default: None, use coral_thr for all)")
+    parser.add_argument("--no_strict", action="store_true")
+    parser.add_argument("--use_coral", type=int, default=0)
+    parser.add_argument("--coral_thr", type=float, default=0.5)
+    parser.add_argument("--coral_thr_last", type=float, default=None)
     args = parser.parse_args()
 
     set_seed(args.seed)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Paths
     split_csv = os.path.join(args.splits_dir, f"{args.split}.csv")
     if not os.path.exists(split_csv):
         raise FileNotFoundError(f"{args.split}.csv not found at: {split_csv}")
-
     if not os.path.exists(args.checkpoint):
         raise FileNotFoundError(f"Checkpoint not found at: {args.checkpoint}")
-
     if not os.path.exists(args.img_dir):
         raise FileNotFoundError(f"Image directory not found at: {args.img_dir}")
 
-    # Load split df
     split_df = pd.read_csv(split_csv)
     split_df = normalize_labels_in_df(split_df)
 
@@ -170,40 +166,31 @@ def main():
         pin_memory=(device.type == "cuda"),
     )
 
-    # Model
-    num_classes = 5 if args.task == "exp" else 3
-    
-    # Auto-detect CORAL from checkpoint if task is EXP
+    # Model outputs (training) classes:
+    train_num_classes = 5 if args.task == "exp" else 3
+
+    # CORAL auto-detect for EXP
     use_coral_flag = bool(args.use_coral)
-    if args.task == "exp" and args.checkpoint:
-        state_dict = load_state_dict_robust(args.checkpoint, device)
-        # Check final layer weight shape to infer CORAL
-        if "head.4.weight" in state_dict:
-            final_weight_shape = state_dict["head.4.weight"].shape
-            inferred_coral = (final_weight_shape[0] == 4)  # 4 outputs = CORAL, 5 = standard
-            if not args.use_coral and inferred_coral:
-                print(f"[INFO] Checkpoint has 4 outputs; auto-enabling CORAL")
-                use_coral_flag = True
-            elif args.use_coral and not inferred_coral:
-                print(f"[WARNING] --use_coral=1 but checkpoint has {final_weight_shape[0]} outputs (expected 4)")
-    
-    model = IVF_EffiMorphPP(num_classes, task=args.task, use_coral=use_coral_flag).to(device)
-    state = load_state_dict_robust(args.checkpoint, device)
+    state_dict = load_state_dict_robust(args.checkpoint, device)
+    if args.task == "exp" and "head.4.weight" in state_dict:
+        out_dim = state_dict["head.4.weight"].shape[0]
+        inferred_coral = (out_dim == 4)
+        if not args.use_coral and inferred_coral:
+            print("[INFO] Checkpoint has 4 outputs; auto-enabling CORAL")
+            use_coral_flag = True
+
+    model = IVF_EffiMorphPP(train_num_classes, task=args.task, use_coral=use_coral_flag).to(device)
     strict = not args.no_strict
-    model.load_state_dict(state, strict=strict)
+    model.load_state_dict(state_dict, strict=strict)
     model.eval()
 
-    # Safety check for CORAL
+    # CORAL decoding thresholds
     coral_thresholds = None
     if use_coral_flag and args.task == "exp":
-        # Test forward pass to check output shape
         with torch.no_grad():
-            dummy_input = torch.randn(1, 3, 224, 224).to(device)
-            dummy_output = model(dummy_input)
-            assert dummy_output.shape[1] == 4, f"Expected 4 CORAL logits for EXP, got {dummy_output.shape[1]}"
-        print(f"[CORAL] Model outputs {dummy_output.shape[1]} logits for EXP ordinal regression")
-        
-        # Prepare threshold list for decoding
+            dummy = torch.randn(1, 3, 224, 224).to(device)
+            out = model(dummy)
+            assert out.shape[1] == 4, f"Expected 4 CORAL logits, got {out.shape[1]}"
         if args.coral_thr_last is not None:
             coral_thresholds = [args.coral_thr, args.coral_thr, args.coral_thr, args.coral_thr_last]
             print(f"[CORAL] Using per-threshold decoding: {coral_thresholds}")
@@ -218,21 +205,15 @@ def main():
 
     with torch.no_grad():
         for batch in loader:
-            if not isinstance(batch, (list, tuple)) or len(batch) < 2:
-                raise ValueError("Unexpected batch structure. Expected (images, labels, ...)")
-
             images = batch[0]
-
-            # If dataset returns image names as the last element
-            img_names = None
-            if len(batch) >= 4:
-                img_names = batch[-1]
+            img_names = batch[-1] if len(batch) >= 4 else None
 
             images = images.to(device, non_blocking=True)
             outputs = model(images)
+
             if use_coral_flag and args.task == "exp":
                 preds = coral_predict_class(outputs, thresholds=coral_thresholds)
-                probs = torch.sigmoid(outputs)  # For CORAL, use sigmoid for probabilities
+                probs = torch.sigmoid(outputs)
             else:
                 probs = torch.softmax(outputs, dim=1)
                 preds = torch.argmax(outputs, dim=1)
@@ -241,142 +222,128 @@ def main():
             all_probs.extend(probs.detach().cpu().numpy().tolist())
 
             if img_names is not None:
-                # ensure python list of strings
                 if isinstance(img_names, (list, tuple)):
                     all_img_names.extend([str(x) for x in img_names])
                 else:
-                    # sometimes tensor/object array
-                    try:
-                        all_img_names.extend([str(x) for x in img_names])
-                    except Exception:
-                        # fallback: no names
-                        all_img_names = []
+                    all_img_names.extend([str(x) for x in img_names])
 
-    # Build predictions dataframe
     os.makedirs(args.out_dir, exist_ok=True)
     metrics_file = os.path.join(args.out_dir, f"metrics_{args.split}.json")
     preds_file = os.path.join(args.out_dir, f"preds_{args.split}.csv")
 
-    gt_col = args.task.upper()
-    if gt_col not in split_df.columns:
-        raise KeyError(f"Ground-truth column '{gt_col}' not found in {split_csv}")
+    if "Image" not in split_df.columns:
+        raise KeyError("Expected 'Image' column in split CSV.")
 
-    # If we have image names, merge by key; otherwise assume order matches CSV
-    if len(all_img_names) == len(all_preds) and "Image" in split_df.columns:
-        pred_rows = {"Image": all_img_names, "y_pred": all_preds}
-        # Use actual number of outputs (4 for CORAL, 5 for standard)
-        num_outputs = len(all_probs[0]) if all_probs else num_classes
-        for i in range(num_outputs):
-            pred_rows[f"prob_{i}"] = [p[i] for p in all_probs]
-        pred_by_key = pd.DataFrame(pred_rows)
+    # Merge by Image
+    pred_rows = {"Image": all_img_names, "y_pred_raw": all_preds}
+    num_outputs = len(all_probs[0]) if all_probs else train_num_classes
+    for i in range(num_outputs):
+        pred_rows[f"prob_{i}"] = [p[i] for p in all_probs]
+    pred_by_key = pd.DataFrame(pred_rows).groupby("Image", as_index=False).mean(numeric_only=True)
 
-        # aggregate in case duplicates exist
-        pred_by_key = pred_by_key.groupby("Image", as_index=False).mean(numeric_only=True)
+    preds_df = split_df.copy()
+    preds_df = preds_df.merge(pred_by_key, on="Image", how="left")
+    if preds_df["y_pred_raw"].isna().any():
+        missing = int(preds_df["y_pred_raw"].isna().sum())
+        raise RuntimeError(f"Missing predictions for {missing} rows after merge by Image.")
 
-        preds_df = split_df.copy()
-        preds_df["y_true_raw"] = preds_df[gt_col]
-        preds_df["y_true"] = build_encoded_ytrue_column(preds_df, args.task)
+    preds_df["y_pred_raw"] = preds_df["y_pred_raw"].astype(int)
 
-        preds_df = preds_df.merge(pred_by_key, on="Image", how="left")
+    # --------------------------
+    # Build y_true/y_pred EXACTLY like authors
+    # --------------------------
+    task = args.task
 
-        # Safety: ensure we have predictions for all rows (if not, dataset/df mismatch)
-        missing = preds_df["y_pred"].isna().sum()
-        if missing > 0:
-            raise RuntimeError(
-                f"Missing predictions for {missing} rows after merge by Image key. "
-                f"Likely mismatch between split CSV and dataset (filtered/dropped images)."
-            )
+    y_true: List[int] = []
+    y_pred: List[int] = []
+    used_images: List[str] = []
 
-        preds_df["y_pred"] = preds_df["y_pred"].astype(int)
+    if task == "exp":
+        # Evaluate EXP on ALL gold_test images, mapping NA/invalid to class 5
+        for _, r in preds_df.iterrows():
+            gt = map_exp_gold_value(r["EXP"])
+            pr = map_pred_exp(int(r["y_pred_raw"]))
+            y_true.append(gt)
+            y_pred.append(pr)
+            used_images.append(str(r["Image"]))
+        eval_num_classes = 6  # 0..5
+        labels = list(range(eval_num_classes))
 
     else:
-        # Fallback: order-aligned
-        if len(all_preds) != len(split_df):
-            raise RuntimeError(
-                f"Length mismatch: preds={len(all_preds)} vs split_df={len(split_df)}. "
-                f"Your GardnerDataset likely filters/drops rows. "
-                f"Fix by returning image_name from dataset and merge by Image key."
-            )
+        # Evaluate ICM/TE only when EXP_gt not in [0,1]
+        col = task.upper()
+        for _, r in preds_df.iterrows():
+            exp_gt = map_exp_gold_value(r["EXP"])
+            if exp_gt in [0, 1]:
+                continue  # not defined for ICM/TE per authors
+            gt = map_icm_te_gold_value(r[col])
+            pr = map_pred_icm_te(int(r["y_pred_raw"]))
+            y_true.append(gt)
+            y_pred.append(pr)
+            used_images.append(str(r["Image"]))
+        eval_num_classes = 4  # 0..3
+        labels = list(range(eval_num_classes))
 
-        preds_df = split_df.copy()
-        preds_df["y_true_raw"] = preds_df[gt_col]
-        preds_df["y_true"] = build_encoded_ytrue_column(preds_df, args.task)
-        preds_df["y_pred"] = all_preds
-        # Use actual number of outputs (4 for CORAL, 5 for standard)
-        num_outputs = len(all_probs[0]) if all_probs else num_classes
-        for i in range(num_outputs):
-            preds_df[f"prob_{i}"] = [p[i] for p in all_probs]
-
-    # Metrics (mask invalid labels)
-    valid_mask_np, y_true = build_valid_mask_and_ytrue(split_df, args.task)
-    valid_pos = np.nonzero(valid_mask_np)[0]
-    y_pred = [int(preds_df.loc[i, "y_pred"]) for i in valid_pos]
-
+    # Metrics (same names as Table 2 intent)
     acc = accuracy_score(y_true, y_pred)
-    avg_prec = precision_score(y_true, y_pred, average="weighted", zero_division=0)
-    avg_rec = recall_score(y_true, y_pred, average="weighted", zero_division=0)
-    avg_f1 = f1_score(y_true, y_pred, average="weighted", zero_division=0)
-    precision, recall, f1, support = precision_recall_fscore_support(
-        y_true, y_pred, average=None, zero_division=0
+    avg_prec = precision_score(y_true, y_pred, average="weighted", zero_division=0, labels=labels)
+    avg_rec = recall_score(y_true, y_pred, average="weighted", zero_division=0, labels=labels)
+    avg_f1 = f1_score(y_true, y_pred, average="weighted", zero_division=0, labels=labels)
+
+    per_prec, per_rec, per_f1, support = precision_recall_fscore_support(
+        y_true, y_pred, labels=labels, average=None, zero_division=0
     )
-    cm = confusion_matrix(y_true, y_pred)
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
 
-    # Safety check: log class counts
+    # Logging
     y_true_counts = Counter(y_true)
-    print(f"y_true class counts after filtering: {dict(y_true_counts)}")
-    for cls in range(num_classes):
+    print(f"y_true class counts (authors-style): {dict(y_true_counts)}")
+    for cls in labels:
         if y_true_counts.get(cls, 0) == 0:
-            print(f"WARNING: Class {cls} has 0 support in gold_test set")
+            print(f"WARNING: Class {cls} has 0 support in {args.split}")
 
-    # y_pred distribution full (0..K-1)
-    counts = Counter(y_pred)
-    counts_full = {i: int(counts.get(i, 0)) for i in range(num_classes)}
-    ratios_full = {i: float(counts_full[i] / max(1, len(y_pred))) for i in range(num_classes)}
+    y_pred_counts = Counter(y_pred)
+    counts_full = {i: int(y_pred_counts.get(i, 0)) for i in labels}
+    ratios_full = {i: float(counts_full[i] / max(1, len(y_pred))) for i in labels}
     print(f"y_pred counts: {counts_full}")
     print(f"y_pred ratio:  {ratios_full}")
-
     print("Confusion Matrix:")
     print(cm)
-    print("Per-class recall:", recall.tolist())
+    print("Per-class recall:", per_rec.tolist())
 
-    metrics = {
-        "task": args.task,
+    # Save
+    out = {
+        "task": task,
         "split": args.split,
-        "num_classes": num_classes,
         "checkpoint": str(args.checkpoint),
-        "splits_dir": str(args.splits_dir),
-        "img_dir": str(args.img_dir),
         "seed": args.seed,
         "device": str(device),
         "n_total_split_rows": int(len(split_df)),
         "n_eval_used": int(len(y_true)),
+        "eval_label_space": labels,
         "accuracy": float(acc),
         "avg-prec": float(avg_prec),
         "avg-rec": float(avg_rec),
         "avg-f1": float(avg_f1),
-        "per_class_precision": precision.tolist(),
-        "per_class_recall": recall.tolist(),
-        "per_class_f1": f1.tolist(),
+        "per_class_precision": per_prec.tolist(),
+        "per_class_recall": per_rec.tolist(),
+        "per_class_f1": per_f1.tolist(),
         "per_class_support": support.tolist(),
         "confusion_matrix": cm.tolist(),
         "y_pred_distribution": {"counts": counts_full, "ratios": ratios_full},
     }
-    
-    # Add CORAL threshold info if applicable
-    if use_coral_flag and args.task == "exp":
-        if isinstance(coral_thresholds, list):
-            metrics["coral_thresholds"] = coral_thresholds
-        else:
-            metrics["coral_threshold"] = float(coral_thresholds)
+    if use_coral_flag and task == "exp":
+        out["coral_thresholds"] = coral_thresholds
 
     with open(metrics_file, "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2, ensure_ascii=False)
+        json.dump(out, f, indent=2, ensure_ascii=False)
+
     preds_df.to_csv(preds_file, index=False)
 
     print(f"Saved metrics to: {os.path.abspath(metrics_file)}")
     print(f"Saved predictions to: {os.path.abspath(preds_file)}")
     print(
-        f"Evaluation complete | task={args.task} | split=gold_test | n_eval_used={len(y_true)} | "
+        f"Evaluation complete | task={task} | split={args.split} | n_eval_used={len(y_true)} | "
         f"accuracy={acc:.4f} | avg-prec={avg_prec:.4f} | avg-rec={avg_rec:.4f} | avg-f1={avg_f1:.4f}"
     )
 
