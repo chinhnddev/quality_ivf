@@ -121,36 +121,39 @@ class StageDataset(Dataset):
 def create_dataset_from_df(df: pd.DataFrame, img_base_dir: str, augment: bool = False):
     """Create dataset from dataframe."""
     stage_map = {"cleavage": 0, "morula": 1, "blastocyst": 2}
-    
+
     # Extract image paths and labels
     image_paths = df["image_path"].str.strip().tolist()
     stage_labels = [stage_map.get(s.lower(), -1) for s in df["stage"].astype(str)]
-    
+
     # Filter out invalid stages
     valid_indices = [i for i, label in enumerate(stage_labels) if label >= 0]
     image_paths = [image_paths[i] for i in valid_indices]
     stage_labels = [stage_labels[i] for i in valid_indices]
-    
+
     if len(image_paths) == 0:
         raise ValueError("No valid samples in dataset")
-    
+
     # Transforms
-    base = [
-        transforms.Resize((224, 224)),
-        transforms.CenterCrop((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ]
-    
     if augment:
-        aug = [
+        transform = transforms.Compose([
+            transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
-        ]
-        transform = transforms.Compose(aug + base)
+            transforms.RandomVerticalFlip(p=0.5),
+            transforms.RandomRotation(degrees=15),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        print(f"STAGE TRAIN transform pipeline: {transform}")
     else:
-        transform = transforms.Compose(base)
-    
+        transform = transforms.Compose([
+            transforms.Resize(224),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        print(f"STAGE VAL/TEST transform pipeline: {transform}")
+
     return StageDataset(image_paths, stage_labels, img_base_dir, transform)
 
 

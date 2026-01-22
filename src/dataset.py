@@ -79,23 +79,22 @@ class GardnerDataset(Dataset):
             raise ValueError(f"Unknown task: {self.task}")
 
         # Transforms
-        base = [
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-
         if self.augment:
-            aug = [
-                transforms.RandomRotation(10),
-                transforms.RandomHorizontalFlip(),
-                transforms.RandomVerticalFlip(),
-            ]
-            if color_jitter:
-                aug.append(transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05))
-            self.transform = transforms.Compose(aug + base)
+            self.transform = transforms.Compose([
+                transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomVerticalFlip(p=0.5),
+                transforms.RandomRotation(degrees=15),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
         else:
-            self.transform = transforms.Compose(base)
+            self.transform = transforms.Compose([
+                transforms.Resize(224),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
 
     def __len__(self):
         return len(self.images)
@@ -166,21 +165,22 @@ class HumanEmbryoStageDataset(Dataset):
             raise ValueError(f"No valid samples found for split '{self.split}' in {csv_path}")
         
         # Transforms
-        base = [
-            transforms.Resize((224, 224)),
-            transforms.CenterCrop((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-        
         if self.augment:
-            aug = [
+            self.transform = transforms.Compose([
+                transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
                 transforms.RandomHorizontalFlip(p=0.5),
-                transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
-            ]
-            self.transform = transforms.Compose(aug + base)
+                transforms.RandomVerticalFlip(p=0.5),
+                transforms.RandomRotation(degrees=15),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
         else:
-            self.transform = transforms.Compose(base)
+            self.transform = transforms.Compose([
+                transforms.Resize(224),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
     
     def __len__(self):
         return len(self.image_paths)
