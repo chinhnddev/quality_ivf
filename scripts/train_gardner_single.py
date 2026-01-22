@@ -819,6 +819,7 @@ def main():
     parser.add_argument("--images_root", default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--use_class_weights", type=int, default=None)
     parser.add_argument("--use_weighted_sampler", type=int, default=0, help="Use WeightedRandomSampler for training (0=OFF, 1=ON)")
     parser.add_argument("--use_coral", type=int, default=0, help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
@@ -861,6 +862,10 @@ def main():
         cfg.train.epochs = args.epochs
     if args.batch_size is not None:
         cfg.train.batch_size = args.batch_size
+    if args.num_workers is not None:
+        if "data" not in cfg:
+            cfg.data = {}
+        cfg.data.num_workers = args.num_workers
     if args.use_class_weights is not None:
         cfg.use_class_weights = bool(args.use_class_weights)
     if args.use_weighted_sampler is not None:
