@@ -56,7 +56,7 @@ model.to(device)
 # Loss function
 train_labels = [int(ds_train.df[label_col].iloc[i]) for i in range(len(ds_train.df))]
 loss_fn = make_loss_fn(track="benchmark_fair", task="exp", num_classes=num_classes,
-                       use_class_weights=False, train_labels=train_labels)
+                       use_class_weights=False, train_labels=train_labels, label_smoothing=0.0)
 
 # Optimizer
 opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=0.0)

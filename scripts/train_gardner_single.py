@@ -124,7 +124,17 @@ class FocalLoss(nn.Module):
         return loss.mean()
 
 
-def make_loss_fn(track: str, task: str, num_classes: int, use_class_weights: bool, train_labels: List[int], sanity_mode: bool = False, use_weighted_sampler: bool = False, use_coral: bool = False) -> nn.Module:
+def make_loss_fn(
+    track: str,
+    task: str,
+    num_classes: int,
+    use_class_weights: bool,
+    train_labels: List[int],
+    sanity_mode: bool = False,
+    use_weighted_sampler: bool = False,
+    use_coral: bool = False,
+    label_smoothing: float = 0.0,
+) -> nn.Module:
     if use_coral and task == "exp":
         # CORAL loss for ordinal regression
         return lambda logits, targets: coral_loss(logits, targets, num_classes)
@@ -140,15 +150,15 @@ def make_loss_fn(track: str, task: str, num_classes: int, use_class_weights: boo
             for i, w in enumerate(weights.tolist()):
                 print(f"  Class {i}: weight={w:.4f}")
     if track == "benchmark_fair":
-        return nn.CrossEntropyLoss(weight=weights)
+        smoothing = 0.0 if use_weighted_sampler or sanity_mode else 0.0
+        return nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
     if track == "improved":
         if task == "exp":
-            # label smoothing for EXP (disable in sanity mode or when using weighted sampler)
-            if use_weighted_sampler:
-                label_smoothing = 0.0
+            if use_weighted_sampler or sanity_mode:
+                smoothing = 0.0
             else:
-                label_smoothing = 0.0 if sanity_mode else 0.1
-            return nn.CrossEntropyLoss(weight=weights, label_smoothing=label_smoothing)
+                smoothing = float(label_smoothing)
+            return nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
         # focal for ICM/TE
         return FocalLoss(gamma=2.0, weight=weights)
     raise ValueError(f"Unknown track: {track}")
@@ -454,16 +464,22 @@ def train_one_run(cfg, args) -> None:
     # Define flags early
     use_class_weights = bool(cfg.use_class_weights)
     use_weighted_sampler = bool(args.use_weighted_sampler)
+    use_coral = bool(args.use_coral) and task == "exp"
+    label_smoothing_cfg = float(getattr(cfg.loss, "label_smoothing", 0.0)) if hasattr(cfg, "loss") else 0.0
+
+    loss_name = "CORAL_BCEWithLogits" if use_coral and task == "exp" else ("CrossEntropyLoss" if task == "exp" else "FocalLoss")
+    applied_smoothing = 0.0
+    if not use_coral and task == "exp" and not (use_weighted_sampler or sanity_mode):
+        applied_smoothing = label_smoothing_cfg
 
     # Startup diagnostics
     print(f"\n[STARTUP DIAGNOSTICS] task={task}, num_classes={num_classes}")
     print(f"  train_size={len(ds_train)}, val_size={len(ds_val)}")
-    print(f"  track={track}, loss_name={'CrossEntropyLoss' if task == 'exp' else 'FocalLoss'}")
-    print(f"  use_class_weights={use_class_weights}, compute_class_weights_from_train={bool(cfg.compute_class_weights_from_train) if hasattr(cfg, 'compute_class_weights_from_train') else False}")
+    print(f"  track={track}, loss_name={loss_name}")
+    print(f"  use_class_weights={use_class_weights}, compute_class_weights_from_train={bool(getattr(cfg, 'compute_class_weights_from_train', False))}")
     print(f"  use_weighted_sampler={use_weighted_sampler}")
     if task == "exp":
-        actual_smoothing = 0.0 if use_weighted_sampler else (0.0 if sanity_mode else 0.1)
-        print(f"  label_smoothing={actual_smoothing}")
+        print(f"  label_smoothing={applied_smoothing}")
     else:
         print(f"  focal_gamma=2.0")
 
@@ -507,7 +523,6 @@ def train_one_run(cfg, args) -> None:
     dropout_p_value = 0.0 if args.sanity_overfit else float(cfg.model.dropout)
 
     # Sanity model scale preset
-    use_coral = bool(args.use_coral) and task == "exp"
     if args.sanity_overfit:
         scale_mapping = {"small": 1.0, "base": 1.25, "large": 1.5}
         width_mult = scale_mapping[args.sanity_model_scale]
@@ -589,10 +604,9 @@ def train_one_run(cfg, args) -> None:
     print("="*80 + "\n")
 
     # Loss
-    use_class_weights = bool(cfg.use_class_weights)
-    use_coral = bool(args.use_coral) and task == "exp"
     loss_fn = make_loss_fn(track=track, task=task, num_classes=num_classes,
-                           use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode, use_weighted_sampler=use_weighted_sampler, use_coral=use_coral)
+                           use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode,
+                           use_weighted_sampler=use_weighted_sampler, use_coral=use_coral, label_smoothing=label_smoothing_cfg)
 
     # Optimizer / scheduler
     optimizer_cfg = cfg.optimizer
@@ -609,6 +623,8 @@ def train_one_run(cfg, args) -> None:
     else:
         opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
         print(f"Using Adam optimizer: lr={lr}, weight_decay={wd}")
+    if use_coral and task == "exp":
+        print("Optimizer=Adam wd=0.0 | label_smoothing=0.0 | loss=CORAL")
     
     epochs = int(cfg.train.epochs)
     warmup_epochs = int(getattr(scheduler_cfg, 'warmup_epochs', 0))
