@@ -132,6 +132,45 @@ def map_pred_exp(v: int) -> int:
     return v if v in [0, 1, 2, 3, 4] else 5
 
 
+def _classification_metrics(y_true: List[int], y_pred: List[int], labels: List[int]) -> dict:
+    if not y_true:
+        zero_cm = [[0 for _ in labels] for _ in labels]
+        return {
+            "confusion_matrix": zero_cm,
+            "per_class_recall": [0.0 for _ in labels],
+            "accuracy": 0.0,
+            "macro_f1": 0.0,
+            "weighted_f1": 0.0,
+        }
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    per_rec = recall_score(y_true, y_pred, labels=labels, average=None, zero_division=0)
+    return {
+        "confusion_matrix": cm.tolist(),
+        "per_class_recall": per_rec.tolist(),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(y_true, y_pred, labels=labels, average="macro", zero_division=0)),
+        "weighted_f1": float(f1_score(y_true, y_pred, labels=labels, average="weighted", zero_division=0)),
+    }
+
+
+def _build_task_metrics(
+    y_true: List[int],
+    y_pred: List[int],
+    labels: List[int],
+    total_matched: int,
+    skipped: int,
+) -> dict:
+    stats = _classification_metrics(y_true, y_pred, labels)
+    stats.update(
+        {
+            "n_total_matched": int(total_matched),
+            "n_skipped_exp_rule": int(skipped),
+            "n_used": int(len(y_true)),
+        }
+    )
+    return stats
+
+
 def _normalize_exp_prediction(value) -> Optional[int]:
     if pd.isna(value):
         return None
@@ -368,12 +407,15 @@ def main():
     # Build y_true/y_pred EXACTLY like authors
     # --------------------------
     task = args.task
-
-    y_true: List[int] = []
-    y_pred: List[int] = []
-    used_images: List[str] = []
+    initial_total = None
+    removed_nd_na = 0
+    metrics_payload = {}
+    summary_msg = ""
 
     if task == "exp":
+        y_true: List[int] = []
+        y_pred: List[int] = []
+        used_images: List[str] = []
         # Evaluate EXP on ALL gold_test images, mapping NA/invalid to class 5
         for _, r in preds_df.iterrows():
             gt = map_exp_gold_value(r["EXP"])
@@ -383,6 +425,67 @@ def main():
             used_images.append(str(r["Image"]))
         eval_num_classes = 6  # 0..5
         labels = list(range(eval_num_classes))
+
+        # Metrics (same names as Table 2 intent)
+        acc = accuracy_score(y_true, y_pred)
+        avg_prec = precision_score(y_true, y_pred, average="weighted", zero_division=0, labels=labels)
+        avg_rec = recall_score(y_true, y_pred, average="weighted", zero_division=0, labels=labels)
+        avg_f1 = f1_score(y_true, y_pred, average="weighted", zero_division=0, labels=labels)
+
+        per_prec, per_rec, per_f1, support = precision_recall_fscore_support(
+            y_true, y_pred, labels=labels, average=None, zero_division=0
+        )
+        cm = confusion_matrix(y_true, y_pred, labels=labels)
+
+        # Logging
+        y_true_counts = Counter(y_true)
+        print(f"y_true class counts (authors-style): {dict(y_true_counts)}")
+        for cls in labels:
+            if y_true_counts.get(cls, 0) == 0:
+                print(f"WARNING: Class {cls} has 0 support in {args.split}")
+
+        y_pred_counts = Counter(y_pred)
+        counts_full = {i: int(y_pred_counts.get(i, 0)) for i in labels}
+        ratios_full = {i: float(counts_full[i] / max(1, len(y_pred))) for i in labels}
+        print(f"y_pred counts: {counts_full}")
+        print(f"y_pred ratio:  {ratios_full}")
+        print("Confusion Matrix:")
+        print(cm)
+        print("Per-class recall:", per_rec.tolist())
+
+        n_eval_total_before = initial_total if initial_total is not None else len(y_true)
+        filtered_ratio = removed_nd_na / n_eval_total_before if n_eval_total_before else 0.0
+        out = {
+            "task": task,
+            "split": args.split,
+            "checkpoint": str(args.checkpoint),
+            "seed": args.seed,
+            "device": str(device),
+            "n_total_split_rows": int(len(split_df)),
+            "n_eval_used": int(len(y_true)),
+            "n_eval_total_before_filter": int(n_eval_total_before),
+            "n_filtered_nd_na": int(removed_nd_na),
+            "filtered_ratio": float(filtered_ratio),
+            "eval_label_space": labels,
+            "accuracy": float(acc),
+            "avg-prec": float(avg_prec),
+            "avg-rec": float(avg_rec),
+            "avg-f1": float(avg_f1),
+            "per_class_precision": per_prec.tolist(),
+            "per_class_recall": per_rec.tolist(),
+            "per_class_f1": per_f1.tolist(),
+            "per_class_support": support.tolist(),
+            "confusion_matrix": cm.tolist(),
+            "y_pred_distribution": {"counts": counts_full, "ratios": ratios_full},
+        }
+        if use_coral_flag and task == "exp":
+            out["coral_thresholds"] = coral_thresholds
+
+        metrics_payload = out
+        summary_msg = (
+            f"Evaluation complete | task={task} | split={args.split} | n_eval_used={len(y_true)} | "
+            f"accuracy={acc:.4f} | avg-prec={avg_prec:.4f} | avg-rec={avg_rec:.4f} | avg-f1={avg_f1:.4f}"
+        )
 
     else:
         # Evaluate ICM/TE only when EXP_gt not in [0,1]
@@ -405,20 +508,12 @@ def main():
         filter_by_exp = bool(args.authors_filter_exp01_for_icm_te)
         if filter_by_exp and exp_pred_label:
             print("[ICM/TE] Applying authors exp {0,1} filter.")
-        for idx, r in preds_df.iterrows():
-            exp_gt = map_exp_gold_value(r["EXP"])
-            if filter_by_exp and exp_gt in [0, 1]:
-                continue  # not defined for ICM/TE per authors
-            exp_pred = exp_pred_series.loc[idx] if exp_pred_series is not None else None
-            if filter_by_exp and exp_pred in [0, 1]:
-                continue
-            gt = map_icm_te_gold_value(r[col])
-            pr = map_pred_icm_te(int(r["y_pred_raw"]))
-            y_true.append(gt)
-            y_pred.append(pr)
-            used_images.append(str(r["Image"]))
-        filter_total = 0
+        total_matched = int(len(preds_df))
         skipped_due_to_exp_rule = 0
+        icm_gt_list: List[int] = []
+        icm_pred_list: List[int] = []
+        te_gt_list: List[int] = []
+        te_pred_list: List[int] = []
         for idx, r in preds_df.iterrows():
             exp_gt = map_exp_gold_value(r["EXP"])
             exp_pred = exp_pred_series.loc[idx] if exp_pred_series is not None else None
@@ -430,90 +525,86 @@ def main():
             if skip_exp:
                 skipped_due_to_exp_rule += 1
                 continue
-            filter_total += 1
-            gt = map_icm_te_gold_value(r[col])
-            pr = map_pred_icm_te(int(r["y_pred_raw"]))
-            y_true.append(gt)
-            y_pred.append(pr)
-            used_images.append(str(r["Image"]))
-        eval_num_classes = 4  # 0..3
-        labels = list(range(eval_num_classes))
+            icm_gt_list.append(map_icm_te_gold_value(r["ICM"]))
+            te_gt_list.append(map_icm_te_gold_value(r["TE"]))
+            pred_label = map_pred_icm_te(int(r["y_pred_raw"]))
+            icm_pred_list.append(pred_label)
+            te_pred_list.append(pred_label)
+        labels = list(range(4))
+        initial_total = total_matched
+        if len(icm_gt_list) != len(te_gt_list):
+            print("[ICM/TE] WARNING: inconsistent ICM/TE list lengths after filtering.")
+        icm_accuracy = 0.0
+        icm_avg_prec = 0.0
+        icm_avg_rec = 0.0
+        icm_avg_f1 = 0.0
+        if icm_gt_list:
+            icm_accuracy = float(accuracy_score(icm_gt_list, icm_pred_list))
+            icm_avg_prec = float(
+                precision_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
+            )
+            icm_avg_rec = float(
+                recall_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
+            )
+            icm_avg_f1 = float(
+                f1_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
+            )
+        icm_metrics = {
+            "accuracy": icm_accuracy,
+            "avg-prec": icm_avg_prec,
+            "avg-rec": icm_avg_rec,
+            "avg-f1": icm_avg_f1,
+        }
+        te_metrics = _build_task_metrics(te_gt_list, te_pred_list, labels, total_matched, skipped_due_to_exp_rule)
         print(
-            f"[ICM/TE] total_matched={filter_total}, skipped_due_to_exp_rule={skipped_due_to_exp_rule}, "
-            f"n_eval_used_icm_te={len(y_true)}"
+            f"[ICM/TE] total_matched={total_matched}, skipped_due_to_exp_rule={skipped_due_to_exp_rule}, "
+            f"n_eval_used_icm={len(icm_gt_list)}, n_eval_used_te={len(te_gt_list)}"
+        )
+        print(
+            f"[ICM] accuracy={icm_accuracy:.4f} | avg-prec={icm_avg_prec:.4f} | "
+            f"avg-rec={icm_avg_rec:.4f} | avg-f1={icm_avg_f1:.4f}"
+        )
+        print("Confusion Matrix (TE):")
+        print(te_metrics["confusion_matrix"])
+        print("Per-class recall (TE):", te_metrics["per_class_recall"])
+
+        n_eval_total_before = initial_total
+        filtered_ratio = removed_nd_na / n_eval_total_before if n_eval_total_before else 0.0
+        metrics_payload = {
+            "task": task,
+            "split": args.split,
+            "checkpoint": str(args.checkpoint),
+            "seed": args.seed,
+            "device": str(device),
+            "n_total_split_rows": int(len(split_df)),
+            "n_eval_used": int(len(icm_gt_list)),
+            "n_eval_used_icm": int(len(icm_gt_list)),
+            "n_eval_used_te": int(len(te_gt_list)),
+            "n_eval_total_before_filter": int(n_eval_total_before) if n_eval_total_before is not None else 0,
+            "n_filtered_nd_na": int(removed_nd_na),
+            "filtered_ratio": float(filtered_ratio),
+            "eval_label_space": labels,
+            "icm": icm_metrics,
+            "te": te_metrics,
+        }
+        summary_msg = (
+            f"Evaluation complete | task={task} | split={args.split} | "
+            f"n_eval_used_icm={len(icm_gt_list)} | accuracy_icm={icm_metrics['accuracy']:.4f} | "
+            f"n_eval_used_te={len(te_gt_list)} | accuracy_te={te_metrics['accuracy']:.4f}"
         )
 
-    # Metrics (same names as Table 2 intent)
-    acc = accuracy_score(y_true, y_pred)
-    avg_prec = precision_score(y_true, y_pred, average="weighted", zero_division=0, labels=labels)
-    avg_rec = recall_score(y_true, y_pred, average="weighted", zero_division=0, labels=labels)
-    avg_f1 = f1_score(y_true, y_pred, average="weighted", zero_division=0, labels=labels)
-
-    per_prec, per_rec, per_f1, support = precision_recall_fscore_support(
-        y_true, y_pred, labels=labels, average=None, zero_division=0
-    )
-    cm = confusion_matrix(y_true, y_pred, labels=labels)
-
-    # Logging
-    y_true_counts = Counter(y_true)
-    print(f"y_true class counts (authors-style): {dict(y_true_counts)}")
-    for cls in labels:
-        if y_true_counts.get(cls, 0) == 0:
-            print(f"WARNING: Class {cls} has 0 support in {args.split}")
-
-    y_pred_counts = Counter(y_pred)
-    counts_full = {i: int(y_pred_counts.get(i, 0)) for i in labels}
-    ratios_full = {i: float(counts_full[i] / max(1, len(y_pred))) for i in labels}
-    print(f"y_pred counts: {counts_full}")
-    print(f"y_pred ratio:  {ratios_full}")
-    print("Confusion Matrix:")
-    print(cm)
-    print("Per-class recall:", per_rec.tolist())
-
-    # Save
-    n_eval_total_before = initial_total if initial_total is not None else len(y_true)
-    filtered_ratio = removed_nd_na / n_eval_total_before if n_eval_total_before else 0.0
-    out = {
-        "task": task,
-        "split": args.split,
-        "checkpoint": str(args.checkpoint),
-        "seed": args.seed,
-        "device": str(device),
-        "n_total_split_rows": int(len(split_df)),
-        "n_eval_used": int(len(y_true)),
-        "n_eval_total_before_filter": int(n_eval_total_before),
-        "n_filtered_nd_na": int(removed_nd_na),
-        "filtered_ratio": float(filtered_ratio),
-        "eval_label_space": labels,
-        "accuracy": float(acc),
-        "avg-prec": float(avg_prec),
-        "avg-rec": float(avg_rec),
-        "avg-f1": float(avg_f1),
-        "per_class_precision": per_prec.tolist(),
-        "per_class_recall": per_rec.tolist(),
-        "per_class_f1": per_f1.tolist(),
-        "per_class_support": support.tolist(),
-        "confusion_matrix": cm.tolist(),
-        "y_pred_distribution": {"counts": counts_full, "ratios": ratios_full},
-    }
-    if use_coral_flag and task == "exp":
-        out["coral_thresholds"] = coral_thresholds
-
     with open(metrics_file, "w", encoding="utf-8") as f:
-        json.dump(out, f, indent=2, ensure_ascii=False)
+        json.dump(metrics_payload, f, indent=2, ensure_ascii=False)
 
     preds_df.to_csv(preds_file, index=False)
 
     print(f"Saved metrics to: {os.path.abspath(metrics_file)}")
     print(f"Saved predictions to: {os.path.abspath(preds_file)}")
-    print(
-        f"Evaluation complete | task={task} | split={args.split} | n_eval_used={len(y_true)} | "
-        f"accuracy={acc:.4f} | avg-prec={avg_prec:.4f} | avg-rec={avg_rec:.4f} | avg-f1={avg_f1:.4f}"
-    )
+    print(summary_msg)
     if task in {"icm", "te"} and removed_nd_na:
         print(
             f"[ICM/TE] Removed ND/NA from metrics: {removed_nd_na}/{n_eval_total_before} "
-            f"({filtered_ratio:.2%}) excluded; coverage uses {len(y_true)} samples."
+            f"({filtered_ratio:.2%}) excluded; coverage uses {len(icm_gt_list)} samples."
         )
 
 
