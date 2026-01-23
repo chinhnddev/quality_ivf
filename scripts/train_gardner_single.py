@@ -279,7 +279,6 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
     precision, recall, f1, support = precision_recall_fscore_support(ys, ps, average=None, zero_division=0)
 
     # y_pred distribution
-    from collections import Counter
     y_pred_counts = Counter(ps)
     y_pred_ratios = {cls: count / len(ps) for cls, count in y_pred_counts.items()}
 
@@ -411,7 +410,6 @@ def train_one_run(cfg, args) -> None:
     train_labels = [int(ds_train.df["norm_label"].iloc[i]) for i in range(len(ds_train.df))]
 
     # Log class distribution
-    from collections import Counter
     label_counts = Counter(train_labels)
     print(f"\nTrain label distribution (task={task}):")
     for cls in sorted(label_counts.keys()):
