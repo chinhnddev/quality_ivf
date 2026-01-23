@@ -362,8 +362,6 @@ def main():
     y_pred: List[int] = []
     used_images: List[str] = []
 
-    initial_total = None
-    removed_nd_na = 0
     if task == "exp":
         # Evaluate EXP on ALL gold_test images, mapping NA/invalid to class 5
         for _, r in preds_df.iterrows():
@@ -408,27 +406,31 @@ def main():
             y_true.append(gt)
             y_pred.append(pr)
             used_images.append(str(r["Image"]))
-        initial_total = len(y_true)
-        filtered = []
-        for gt, pr, img in zip(y_true, y_pred, used_images):
-            if gt in {0, 1, 2}:
-                filtered.append((gt, pr, img))
-        removed = initial_total - len(filtered)
-        if initial_total:
-            print(
-                f"[ICM/TE] Trimmed {removed}/{initial_total} ({removed/initial_total:.2%}) ND/NA samples "
-                f"before computing 3-class metrics."
-            )
-        if filtered:
-            y_true, y_pred, used_images = zip(*filtered)
-            y_true = list(y_true)
-            y_pred = list(y_pred)
-        else:
-            y_true, y_pred = [], []
-            used_images = []
-        eval_num_classes = 3  # 0..2
+        filter_total = 0
+        skipped_due_to_exp_rule = 0
+        for idx, r in preds_df.iterrows():
+            exp_gt = map_exp_gold_value(r["EXP"])
+            exp_pred = exp_pred_series.loc[idx] if exp_pred_series is not None else None
+            skip_exp = False
+            if filter_by_exp and exp_gt in [0, 1]:
+                skip_exp = True
+            if filter_by_exp and exp_pred in [0, 1]:
+                skip_exp = True
+            if skip_exp:
+                skipped_due_to_exp_rule += 1
+                continue
+            filter_total += 1
+            gt = map_icm_te_gold_value(r[col])
+            pr = map_pred_icm_te(int(r["y_pred_raw"]))
+            y_true.append(gt)
+            y_pred.append(pr)
+            used_images.append(str(r["Image"]))
+        eval_num_classes = 4  # 0..3
         labels = list(range(eval_num_classes))
-        removed_nd_na = removed
+        print(
+            f"[ICM/TE] total_matched={filter_total}, skipped_due_to_exp_rule={skipped_due_to_exp_rule}, "
+            f"n_eval_used_icm_te={len(y_true)}"
+        )
 
     # Metrics (same names as Table 2 intent)
     acc = accuracy_score(y_true, y_pred)
