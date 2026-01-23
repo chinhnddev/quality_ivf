@@ -15,6 +15,7 @@ sys.path.append(str(ROOT))
 import numpy as np
 import pandas as pd
 import torch
+from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from sklearn.metrics import (
     accuracy_score,
@@ -63,6 +64,37 @@ def normalize_labels_in_df(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
     return df
+
+
+MODEL_CONFIG_MAPPING = {
+    "dropout": "dropout_p",
+    "width_mult": "width_mult",
+    "depth_mult": "depth_mult",
+    "use_xception_mid": "use_xception_mid",
+    "use_late_mhsa": "use_late_mhsa",
+    "mhsa_layers": "mhsa_layers",
+    "mhsa_heads": "mhsa_heads",
+    "use_gem": "use_gem",
+    "head_mlp": "head_mlp",
+    "head_hidden_dim": "head_hidden_dim",
+    "head_dropout": "head_dropout",
+}
+
+
+def load_model_kwargs_from_config(config_path: Optional[Path]) -> dict:
+    if config_path is None or not config_path.exists():
+        return {}
+    cfg = OmegaConf.load(config_path)
+    model_cfg = cfg.get("model")
+    if model_cfg is None:
+        return {}
+    if OmegaConf.is_config(model_cfg):
+        model_cfg = OmegaConf.to_container(model_cfg, resolve=True)
+    kwargs = {}
+    for field, arg_name in MODEL_CONFIG_MAPPING.items():
+        if field in model_cfg and model_cfg[field] is not None:
+            kwargs[arg_name] = model_cfg[field]
+    return kwargs
 
 
 # --------------------------
@@ -170,6 +202,8 @@ def main():
     parser.add_argument("--img_dir", type=str, default="data/blastocyst_Dataset/Images")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=2)  # safer on colab
+    parser.add_argument("--config", type=str, default=None,
+                        help="Optional config.yaml to recreate training model settings (defaults to <checkpoint>/config.yaml).")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_strict", action="store_true")
     parser.add_argument("--use_coral", type=int, default=0)
@@ -229,7 +263,26 @@ def main():
         else:
             print(f"[AUTO CORAL] No tuned threshold found; falling back to default {coral_thr_value:.2f}")
 
-    model = IVF_EffiMorphPP(train_num_classes, task=args.task, use_coral=use_coral_flag).to(device)
+    config_file = Path(args.config) if args.config else None
+    if config_file and not config_file.exists():
+        raise FileNotFoundError(f"Config file not found at: {config_file}")
+    if config_file is None:
+        candidate = Path(args.checkpoint).resolve().parent / "config.yaml"
+        if candidate.exists():
+            config_file = candidate
+
+    model_kwargs = load_model_kwargs_from_config(config_file)
+    if config_file:
+        print(f"[CONFIG] Loading model settings from {config_file}")
+    else:
+        print("[CONFIG] No config.yaml detected next to checkpoint; using default model settings.")
+
+    model = IVF_EffiMorphPP(
+        train_num_classes,
+        task=args.task,
+        use_coral=use_coral_flag,
+        **model_kwargs,
+    ).to(device)
     strict = not args.no_strict
     model.load_state_dict(state_dict, strict=strict)
     model.eval()
