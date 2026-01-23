@@ -15,7 +15,15 @@ import torch
 import torch.nn as nn
 from collections import Counter
 from omegaconf import OmegaConf
-from sklearn.metrics import f1_score, accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_recall_fscore_support,
+    precision_score,
+    recall_score,
+)
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 from torchvision import transforms
@@ -114,6 +122,7 @@ def make_loss_fn(
     use_weighted_sampler: bool = False,
     use_coral: bool = False,
     label_smoothing: float = 0.0,
+    use_focal: bool = False,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     metadata: Dict[str, Any] = {"loss_name": "cross_entropy"}
     if use_coral and task == "exp":
@@ -144,14 +153,12 @@ def make_loss_fn(
             loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
             metadata["loss_name"] = "cross_entropy"
             return loss, metadata
-        # ICM/TE: prefer CE when class weights enabled
-        if use_class_weights and weights is not None:
-            print(f"[LOSS] Class weights enabled for {task}; switching to CrossEntropyLoss")
-            loss = nn.CrossEntropyLoss(weight=weights)
-            metadata["loss_name"] = "cross_entropy"
+        if use_focal:
+            loss = FocalLoss(gamma=2.0, weight=weights if use_class_weights else None)
+            metadata["loss_name"] = "focal"
             return loss, metadata
-        loss = FocalLoss(gamma=2.0, weight=weights)
-        metadata["loss_name"] = "focal"
+        loss = nn.CrossEntropyLoss(weight=weights)
+        metadata["loss_name"] = "cross_entropy"
         return loss, metadata
     raise ValueError(f"Unknown track: {track}")
 
@@ -287,6 +294,15 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
     acc = accuracy_score(ys, ps) if len(ys) else 0.0
     macro_f1 = f1_score(ys, ps, average="macro") if len(ys) else 0.0
     weighted_f1 = f1_score(ys, ps, average="weighted") if len(ys) else 0.0
+    avg_precision_weighted = (
+        precision_score(ys, ps, average="weighted", zero_division=0) if len(ys) else 0.0
+    )
+    avg_recall_weighted = (
+        recall_score(ys, ps, average="weighted", zero_division=0) if len(ys) else 0.0
+    )
+    avg_f1_weighted = (
+        f1_score(ys, ps, average="weighted", zero_division=0) if len(ys) else 0.0
+    )
 
     # Per-class metrics
     precision, recall, f1, support = precision_recall_fscore_support(ys, ps, average=None, zero_division=0)
@@ -309,6 +325,9 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
         "acc": float(acc),
         "macro_f1": float(macro_f1),
         "weighted_f1": float(weighted_f1),
+        "avg_precision_weighted": float(avg_precision_weighted),
+        "avg_recall_weighted": float(avg_recall_weighted),
+        "avg_f1_weighted": float(avg_f1_weighted),
         "per_class_precision": precision.tolist() if precision is not None else [],
         "per_class_recall": recall.tolist() if recall is not None else [],
         "per_class_f1": f1.tolist() if f1 is not None else [],
@@ -443,6 +462,15 @@ def train_one_run(cfg, args) -> None:
     # Define flags early
     use_class_weights = bool(cfg.use_class_weights)
     use_weighted_sampler = bool(args.use_weighted_sampler)
+    if task in {"icm", "te"} and use_class_weights and use_weighted_sampler:
+        print("[WARN] ICM/TE running with sampler AND class weights; disabling class weights to avoid double weighting.")
+        print("  Recommended default: use_weighted_sampler=0, use_class_weights=1, loss=CrossEntropyLoss")
+        use_class_weights = False
+    use_icm_focal = bool(getattr(args, "icm_use_focal", 0))
+    if task in {"icm", "te"} and use_class_weights and use_weighted_sampler:
+        print("[WARN] ICM/TE running with sampler AND class weights; disabling class weights to avoid double weighting.")
+        print("  Recommended default: use_weighted_sampler=0, use_class_weights=1, loss=CrossEntropyLoss")
+        use_class_weights = False
     if task in {"icm", "te"} and use_class_weights and use_weighted_sampler:
         print("[WARN] ICM/TE running with both class weights and weighted sampler; disabling sampler to avoid double weighting.")
         print("  Recommended default: use_class_weights=1, use_weighted_sampler=0, loss=CrossEntropyLoss")
@@ -634,9 +662,12 @@ def train_one_run(cfg, args) -> None:
     # Loss
     loss_fn, loss_meta = make_loss_fn(track=track, task=task, num_classes=num_classes,
                            use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode,
-                           use_weighted_sampler=use_weighted_sampler, use_coral=use_coral, label_smoothing=label_smoothing_cfg)
+                           use_weighted_sampler=use_weighted_sampler, use_coral=use_coral, label_smoothing=label_smoothing_cfg,
+                           use_focal=use_icm_focal)
     if isinstance(loss_fn, nn.Module):
         loss_fn = loss_fn.to(device)
+    if task in {"icm", "te"}:
+        print(f"[ICM/TE] monitor=val_avg_f1(weighted), sampler={use_weighted_sampler}, class_weights={use_class_weights}, loss={loss_meta.get('loss_name','cross_entropy')}")
 
     # Optimizer / scheduler
     optimizer_cfg = cfg.optimizer
@@ -674,6 +705,7 @@ def train_one_run(cfg, args) -> None:
     if task == "exp" and use_coral:
         print(f"CORAL tuning: enabled={tune_coral_thr} grid=[{thr_min},{thr_max}] step={thr_step}")
 
+    monitor_metric_key = "avg_f1_weighted" if task in {"icm", "te"} else "macro_f1"
     best_metric = -1.0
     best_path = out_dir / "best.ckpt"
     metrics_val_path = out_dir / "metrics_val.json"
@@ -852,10 +884,15 @@ def train_one_run(cfg, args) -> None:
 
         # val
         val_metrics = evaluate_on_val(model, dl_val, device, task, epoch, use_coral)
-        monitor = val_metrics["macro_f1"]  # align with cfg.monitor.metric if you prefer parsing it
-        print(f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f} | "
-              f"val_acc={val_metrics['acc']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
-              f"val_weighted_f1={val_metrics['weighted_f1']:.4f}")
+        monitor = val_metrics[monitor_metric_key]
+        print(
+            f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f} | "
+            f"val_acc={val_metrics['acc']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
+            f"val_weighted_f1={val_metrics['weighted_f1']:.4f} "
+            f"val_avg_prec={val_metrics['avg_precision_weighted']:.4f} "
+            f"val_avg_rec={val_metrics['avg_recall_weighted']:.4f} "
+            f"val_avg_f1={val_metrics['avg_f1_weighted']:.4f}"
+        )
 
         # save best
         if monitor > best_metric:
@@ -968,6 +1005,8 @@ def main():
     parser.add_argument("--use_class_weights", type=int, default=None)
     parser.add_argument("--use_weighted_sampler", type=int, default=0, help="Use WeightedRandomSampler for training (0=OFF, 1=ON)")
     parser.add_argument("--use_coral", type=int, default=0, help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
+    parser.add_argument("--icm_use_focal", type=int, choices=[0, 1], default=0,
+                        help="Use focal loss for ICM/TE runs when track=improved (default 0).")
 
     parser.add_argument("--lr", type=float, default=None, help="Base learning rate (paper default 5e-4).")
     parser.add_argument("--warmup_lr", type=float, default=None, help="Warmup learning rate (paper default 1e-6).")
