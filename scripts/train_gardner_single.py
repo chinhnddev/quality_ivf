@@ -309,7 +309,10 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
 
     # y_pred distribution
     y_pred_counts = Counter(ps)
-    y_pred_ratios = {cls: count / len(ps) for cls, count in y_pred_counts.items()}
+    total_samples = max(1, len(ps))
+    y_pred_ratios = {cls: count / total_samples for cls, count in y_pred_counts.items()}
+    y_true_counts = Counter(ys)
+    y_true_ratios = {cls: count / total_samples for cls, count in y_true_counts.items()}
 
     if task in {"icm", "te"}:
         unique_labels = sorted(set(ys))
@@ -333,7 +336,9 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
         "per_class_f1": f1.tolist() if f1 is not None else [],
         "per_class_support": support.tolist() if support is not None else [],
         "y_pred_counts": dict(sorted(y_pred_counts.items())),
-        "y_pred_ratios": dict(sorted(y_pred_ratios.items()))
+        "y_pred_ratios": dict(sorted(y_pred_ratios.items())),
+        "y_true_counts": dict(sorted(y_true_counts.items())),
+        "y_true_ratios": dict(sorted(y_true_ratios.items()))
     }
 
 
@@ -668,8 +673,18 @@ def train_one_run(cfg, args) -> None:
                            use_focal=use_icm_focal)
     if isinstance(loss_fn, nn.Module):
         loss_fn = loss_fn.to(device)
+    monitor_metric_label = getattr(args, "monitor_metric", None)
+    if monitor_metric_label is None:
+        monitor_metric_label = "avg_f1_weighted" if task in {"icm", "te"} else "macro_f1"
+    monitor_metric_key = monitor_metric_label
+    if monitor_metric_key.startswith("val_"):
+        monitor_metric_key = monitor_metric_key[len("val_") :]
     if task in {"icm", "te"}:
-        print(f"[ICM/TE] monitor=val_avg_f1(weighted), sampler={use_weighted_sampler}, class_weights={use_class_weights}, loss={loss_meta.get('loss_name','cross_entropy')}")
+        print(
+            f"[ICM/TE] monitor={monitor_metric_label} (key={monitor_metric_key}), "
+            f"sampler={use_weighted_sampler}, class_weights={use_class_weights}, "
+            f"loss={loss_meta.get('loss_name','cross_entropy')}"
+        )
 
     # Optimizer / scheduler
     optimizer_cfg = cfg.optimizer
@@ -707,8 +722,8 @@ def train_one_run(cfg, args) -> None:
     if task == "exp" and use_coral:
         print(f"CORAL tuning: enabled={tune_coral_thr} grid=[{thr_min},{thr_max}] step={thr_step}")
 
-    monitor_metric_key = "avg_f1_weighted" if task in {"icm", "te"} else "macro_f1"
     best_metric = -1.0
+    best_epoch = 0
     best_path = out_dir / "best.ckpt"
     metrics_val_path = out_dir / "metrics_val.json"
 
@@ -895,17 +910,27 @@ def train_one_run(cfg, args) -> None:
             f"val_avg_rec={val_metrics['avg_recall_weighted']:.4f} "
             f"val_avg_f1={val_metrics['avg_f1_weighted']:.4f}"
         )
+        if task in {"icm", "te"}:
+            class_range = range(4)
+            y_pred_counts_full = {cls: val_metrics["y_pred_counts"].get(cls, 0) for cls in class_range}
+            y_true_counts_full = {cls: val_metrics["y_true_counts"].get(cls, 0) for cls in class_range}
+            print(f"  Val y_pred counts: {y_pred_counts_full}")
+            print(f"  Val y_true counts: {y_true_counts_full}")
 
         # save best
         if monitor > best_metric:
             best_metric = monitor
+            best_epoch = epoch
             torch.save({"state_dict": model.state_dict(),
                         "task": task, "track": track,
                         "num_classes": num_classes,
                         "label_col": label_col}, best_path)
             with open(metrics_val_path, "w", encoding="utf-8") as f:
                 json.dump({"best_epoch": epoch, "best_val": val_metrics}, f, indent=2)
-            print(f"  ✓ Saved best to {best_path} (monitor={best_metric:.4f})")
+            print(
+                f"  [BEST] Saved best to {best_path} "
+                f"(monitor={monitor_metric_label}={best_metric:.4f})"
+            )
         if use_swa and epoch >= swa_start_epoch:
             swa_model.update_parameters(model)
             swa_scheduler.step()
@@ -950,8 +975,11 @@ def train_one_run(cfg, args) -> None:
     # Write debug report
     debug_report_path = out_dir / "debug_report.txt"
     with open(debug_report_path, "w") as f:
-        f.write(f"Best epoch: {best_metric}\n")
-        f.write(f"Best val_macro_f1: {best_metric:.4f}\n")
+        f.write(f"Best epoch: {best_epoch}\n")
+        f.write(
+            f"Best monitor {monitor_metric_label} "
+            f"({monitor_metric_key}) = {best_metric:.4f}\n"
+        )
         f.write(f"y_pred distribution at best epoch: {val_metrics['y_pred_counts']}\n")
         f.write(f"Confusion matrix at best epoch: {val_metrics.get('confusion_matrix', 'N/A')}\n")
         f.write(f"Class weights applied: {use_class_weights}\n")
@@ -971,7 +999,10 @@ def train_one_run(cfg, args) -> None:
         if max_ratio > 0.8:
             f.write("Likely majority-class collapse due to imbalance. Recommend enabling WeightedRandomSampler or stronger class reweighting; reduce label_smoothing; reduce warmup.\n")
 
-    print(f"\nDone. Best val macro_f1 = {best_metric:.4f}")
+    print(
+        f"\nDone. Best monitor '{monitor_metric_label}' "
+        f"({monitor_metric_key}) = {best_metric:.4f}"
+    )
     print(f"Artifacts: {out_dir}")
     print(f"Debug report: {debug_report_path}")
     if use_swa:
@@ -1009,6 +1040,8 @@ def main():
     parser.add_argument("--use_coral", type=int, default=0, help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
     parser.add_argument("--icm_use_focal", type=int, choices=[0, 1], default=0,
                         help="Use focal loss for ICM/TE runs when track=improved (default 0).")
+    parser.add_argument("--monitor_metric", type=str, default=None,
+                        help="Metric key to monitor for best checkpoint (default weighted F1 for ICM/TE, macro F1 for EXP).")
 
     parser.add_argument("--lr", type=float, default=None, help="Base learning rate (paper default 5e-4).")
     parser.add_argument("--warmup_lr", type=float, default=None, help="Warmup learning rate (paper default 1e-6).")
