@@ -608,6 +608,8 @@ def train_one_run(cfg, args) -> None:
     loss_fn = make_loss_fn(track=track, task=task, num_classes=num_classes,
                            use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode,
                            use_weighted_sampler=use_weighted_sampler, use_coral=use_coral, label_smoothing=label_smoothing_cfg)
+    if isinstance(loss_fn, nn.Module):
+        loss_fn = loss_fn.to(device)
 
     # Optimizer / scheduler
     optimizer_cfg = cfg.optimizer
