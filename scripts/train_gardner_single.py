@@ -114,10 +114,10 @@ def make_loss_fn(
     use_weighted_sampler: bool = False,
     use_coral: bool = False,
     label_smoothing: float = 0.0,
-) -> nn.Module:
+) -> Tuple[nn.Module, Dict[str, Any]]:
     if use_coral and task == "exp":
         # CORAL loss for ordinal regression
-        return lambda logits, targets: coral_loss(logits, targets, num_classes)
+        return lambda logits, targets: coral_loss(logits, targets, num_classes), metadata
     weights = None
     if use_class_weights:
         weights = compute_class_weights(train_labels, num_classes)
@@ -131,16 +131,27 @@ def make_loss_fn(
                 print(f"  Class {i}: weight={w:.4f}")
     if track == "benchmark_fair":
         smoothing = 0.0 if use_weighted_sampler or sanity_mode else 0.0
-        return nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
+        loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
+        metadata["loss_name"] = "cross_entropy"
+        return loss, metadata
     if track == "improved":
         if task == "exp":
             if use_weighted_sampler or sanity_mode:
                 smoothing = 0.0
             else:
                 smoothing = float(label_smoothing)
-            return nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
-        # focal for ICM/TE
-        return FocalLoss(gamma=2.0, weight=weights)
+            loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
+            metadata["loss_name"] = "cross_entropy"
+            return loss, metadata
+        # ICM/TE: prefer CE when class weights enabled
+        if use_class_weights and weights is not None:
+            print(f"[LOSS] Class weights enabled for {task}; switching to CrossEntropyLoss")
+            loss = nn.CrossEntropyLoss(weight=weights)
+            metadata["loss_name"] = "cross_entropy"
+            return loss, metadata
+        loss = FocalLoss(gamma=2.0, weight=weights)
+        metadata["loss_name"] = "focal"
+        return loss, metadata
     raise ValueError(f"Unknown track: {track}")
 
 
@@ -254,7 +265,7 @@ class GardnerDataset(Dataset):
 # =========================
 
 @torch.no_grad()
-def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, use_coral: bool = False) -> Dict:
+def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, task: str, epoch: int, use_coral: bool = False) -> Dict:
     model.eval()
     ys, ps = [], []
     for batch in loader:
@@ -271,6 +282,7 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
             pred = logits.argmax(dim=1).cpu().numpy().tolist()
         ys.extend(y.numpy().tolist())
         ps.extend(pred)
+    ys_tensor = torch.tensor(ys)
     acc = accuracy_score(ys, ps) if len(ys) else 0.0
     macro_f1 = f1_score(ys, ps, average="macro") if len(ys) else 0.0
     weighted_f1 = f1_score(ys, ps, average="weighted") if len(ys) else 0.0
@@ -281,6 +293,16 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
     # y_pred distribution
     y_pred_counts = Counter(ps)
     y_pred_ratios = {cls: count / len(ps) for cls, count in y_pred_counts.items()}
+
+    if task in {"icm", "te"}:
+        unique_labels = sorted(set(ys))
+        if epoch == 1:
+            if unique_labels:
+                print(f"[VAL DEBUG] task={task} epoch={epoch} y_true unique={unique_labels} min={min(unique_labels)} max={max(unique_labels)}")
+            else:
+                print(f"[VAL DEBUG] task={task} epoch={epoch} y_true empty")
+            print(f"[VAL DEBUG] y_pred counts: {dict(sorted(y_pred_counts.items()))}")
+        assert set(unique_labels).issubset({0, 1, 2}), "ICM/TE val contains invalid labels after filtering"
 
     return {
         "acc": float(acc),
@@ -605,7 +627,7 @@ def train_one_run(cfg, args) -> None:
     print("="*80 + "\n")
 
     # Loss
-    loss_fn = make_loss_fn(track=track, task=task, num_classes=num_classes,
+    loss_fn, loss_meta = make_loss_fn(track=track, task=task, num_classes=num_classes,
                            use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode,
                            use_weighted_sampler=use_weighted_sampler, use_coral=use_coral, label_smoothing=label_smoothing_cfg)
     if isinstance(loss_fn, nn.Module):
@@ -824,7 +846,7 @@ def train_one_run(cfg, args) -> None:
         train_loss = running / max(n, 1)
 
         # val
-        val_metrics = evaluate_on_val(model, dl_val, device, use_coral)
+        val_metrics = evaluate_on_val(model, dl_val, device, task, epoch, use_coral)
         monitor = val_metrics["macro_f1"]  # align with cfg.monitor.metric if you prefer parsing it
         print(f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f} | "
               f"val_acc={val_metrics['acc']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
@@ -862,7 +884,7 @@ def train_one_run(cfg, args) -> None:
             "swa": True
         }, swa_ckpt_path)
         print(f"[SWA] Saved averaged checkpoint to {swa_ckpt_path}")
-        swa_val_metrics = evaluate_on_val(swa_model, dl_val, device, use_coral)
+        swa_val_metrics = evaluate_on_val(swa_model, dl_val, device, task, epoch, use_coral)
         print(f"[SWA VAL] acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}")
 
     threshold_result = None
