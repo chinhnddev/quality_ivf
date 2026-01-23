@@ -7,7 +7,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -115,6 +115,7 @@ def make_loss_fn(
     use_coral: bool = False,
     label_smoothing: float = 0.0,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
+    metadata: Dict[str, Any] = {"loss_name": "cross_entropy"}
     if use_coral and task == "exp":
         # CORAL loss for ordinal regression
         return lambda logits, targets: coral_loss(logits, targets, num_classes), metadata
@@ -442,6 +443,10 @@ def train_one_run(cfg, args) -> None:
     # Define flags early
     use_class_weights = bool(cfg.use_class_weights)
     use_weighted_sampler = bool(args.use_weighted_sampler)
+    if task in {"icm", "te"} and use_class_weights and use_weighted_sampler:
+        print("[WARN] ICM/TE running with both class weights and weighted sampler; disabling sampler to avoid double weighting.")
+        print("  Recommended default: use_class_weights=1, use_weighted_sampler=0, loss=CrossEntropyLoss")
+        use_weighted_sampler = False
     use_coral = bool(args.use_coral) and task == "exp"
     label_smoothing_cfg = float(getattr(cfg.loss, "label_smoothing", 0.0)) if hasattr(cfg, "loss") else 0.0
 
