@@ -41,7 +41,7 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-def load_state_dict_robust(ckpt_path: str, device: torch.device) -> dict:
+def load_state_dict_robust(ckpt_path: str, device: torch.device) -> Tuple[dict, dict]:
     ckpt = torch.load(ckpt_path, map_location=device)
     state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
 
@@ -56,7 +56,10 @@ def load_state_dict_robust(ckpt_path: str, device: torch.device) -> dict:
     if "n_averaged" in new_state:
         new_state.pop("n_averaged", None)
         print("[SWA] Dropped 'n_averaged' key from checkpoint before loading.")
-    return new_state
+    metadata = {}
+    if isinstance(ckpt, dict):
+        metadata = {k: v for k, v in ckpt.items() if k != "state_dict"}
+    return new_state, metadata
 
 
 def normalize_labels_in_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -241,17 +244,25 @@ def main():
     )
 
     # Model outputs (training) classes:
-    train_num_classes = 5 if args.task == "exp" else 3
-
-    # CORAL auto-detect for EXP
     use_coral_flag = bool(args.use_coral)
-    state_dict = load_state_dict_robust(args.checkpoint, device)
+    state_dict, ckpt_meta = load_state_dict_robust(args.checkpoint, device)
+    default_num_classes = 5 if args.task == "exp" else 3
+    train_num_classes = ckpt_meta.get("num_classes", default_num_classes)
+    if train_num_classes is None:
+        train_num_classes = default_num_classes
+    print(f"[EVAL] task={args.task} | train_num_classes={train_num_classes}")
     if args.task == "exp" and "head.4.weight" in state_dict:
         out_dim = state_dict["head.4.weight"].shape[0]
         inferred_coral = (out_dim == 4)
         if not args.use_coral and inferred_coral:
             print("[INFO] Checkpoint has 4 outputs; auto-enabling CORAL")
             use_coral_flag = True
+    if args.task in {"icm", "te"} and "head.4.weight" in state_dict:
+        ckpt_out_dim = state_dict["head.4.weight"].shape[0]
+        assert ckpt_out_dim == train_num_classes, (
+            f"Checkpoint head has {ckpt_out_dim} outputs but evaluator built {train_num_classes} logits. "
+            "Pass the matching config or checkpoint metadata."
+        )
 
     user_provided_thr = args.coral_thr is not None
     coral_thr_value = args.coral_thr if user_provided_thr else DEFAULT_CORAL_THR
