@@ -47,6 +47,7 @@ class GardnerDataset(Dataset):
                 raise ValueError(f"CSV missing required column: {col}. Got columns={df.columns.tolist()}")
 
         df["Image"] = df["Image"].astype(str).str.strip()
+        df["exp_norm_label"] = df["EXP"].apply(normalize_exp_token)
         if self.task == "exp":
             df["norm_label"] = df["EXP"].apply(normalize_exp_token)
         elif self.task in {"icm", "te"}:
@@ -54,17 +55,31 @@ class GardnerDataset(Dataset):
         else:
             raise ValueError(f"Unknown task: {self.task}")
 
-        # Filtering
+        if self.split not in {"train", "val", "test"}:
+            raise ValueError(f"Unknown split: {self.split}")
+
         if self.split in {"train", "val"}:
             if self.task == "exp":
                 valid = {"0", "1", "2", "3", "4"}
                 df = df[df["norm_label"].isin(valid)].copy()
-            else:  # icm / te
+            else:
+                before_invalid = len(df)
+                invalid_counts = Counter(df["norm_label"])
                 df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
-        elif self.split == "test":
-            pass
-        else:
-            raise ValueError(f"Unknown split: {self.split}")
+                print(
+                    f"[FILTER] {self.task.upper()} {self.split}: kept {len(df)}/{before_invalid} after removing ND/NA/invalid labels ({dict(invalid_counts)})"
+                )
+                if self.task in {"icm", "te"}:
+                    before_exp = len(df)
+                    exp_counts = Counter(df["exp_norm_label"])
+                    df = df[~df["exp_norm_label"].isin({"0", "1"})].copy()
+                    after_exp = len(df)
+                    dropped = before_exp - after_exp
+                    print(
+                        f"[FILTER] {self.task.upper()} {self.split}: removed {dropped} samples with EXP in {{0,1}} (before={before_exp}, after={after_exp})"
+                    )
+                    print(f"  EXP counts before final filter: {dict(exp_counts)}")
+                    print(f"  Post-filter label counts: {dict(Counter(df['norm_label']))}")
 
         df = df.reset_index(drop=True)
 

@@ -401,8 +401,10 @@ def train_one_run(cfg, args) -> None:
         sanity_mode=False,
     )
 
-    print("train_size=", len(ds_train), "val_size=", len(ds_val))
-    print("num_classes=", num_classes)
+    label_counts_after = Counter(ds_train.df["norm_label"])
+    print(f"[DATA FILTER] {task.upper()} train after filtering: {len(ds_train)} samples; val: {len(ds_val)} samples")
+    print(f"  Train label counts: {dict(sorted(label_counts_after.items()))}")
+    print(f"num_classes=", num_classes)
 
     # Collect train labels (after filtering) for class weights
     train_labels = [int(ds_train.df["norm_label"].iloc[i]) for i in range(len(ds_train.df))]
@@ -427,12 +429,12 @@ def train_one_run(cfg, args) -> None:
     if not use_coral and task == "exp" and not (use_weighted_sampler or sanity_mode):
         applied_smoothing = label_smoothing_cfg
 
+    print(f"[CONFIG] use_class_weights={use_class_weights}, use_weighted_sampler={use_weighted_sampler}")
     # Startup diagnostics
     print(f"\n[STARTUP DIAGNOSTICS] task={task}, num_classes={num_classes}")
     print(f"  train_size={len(ds_train)}, val_size={len(ds_val)}")
     print(f"  track={track}, loss_name={loss_name}")
-    print(f"  use_class_weights={use_class_weights}, compute_class_weights_from_train={bool(getattr(cfg, 'compute_class_weights_from_train', False))}")
-    print(f"  use_weighted_sampler={use_weighted_sampler}")
+    print(f"  compute_class_weights_from_train={bool(getattr(cfg, 'compute_class_weights_from_train', False))}")
     if task == "exp":
         print(f"  label_smoothing={applied_smoothing}")
     else:
