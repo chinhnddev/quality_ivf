@@ -52,6 +52,7 @@ class GardnerDataset(Dataset):
             df["norm_label"] = df["EXP"].apply(normalize_exp_token)
         elif self.task in {"icm", "te"}:
             df["norm_label"] = df[self.task.upper()].apply(normalize_icm_te_token)
+            df["norm_label"] = df["norm_label"].apply(lambda tok: int(tok) if tok in {"0", "1", "2"} else 3)
         else:
             raise ValueError(f"Unknown task: {self.task}")
 
@@ -65,9 +66,9 @@ class GardnerDataset(Dataset):
             else:
                 before_invalid = len(df)
                 invalid_counts = Counter(df["norm_label"])
-                df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
+                df = df[df["norm_label"].isin({0, 1, 2, 3})].copy()
                 print(
-                    f"[FILTER] {self.task.upper()} {self.split}: kept {len(df)}/{before_invalid} after removing ND/NA/invalid labels ({dict(invalid_counts)})"
+                    f"[FILTER] {self.task.upper()} {self.split}: kept {len(df)}/{before_invalid} after restricting labels to 0..3 ({dict(invalid_counts)})"
                 )
                 if self.task in {"icm", "te"}:
                     before_exp = len(df)
@@ -92,8 +93,13 @@ class GardnerDataset(Dataset):
         if self.task == "exp":
             self.labels = [parse_norm_label(lbl) for lbl in self.labels_raw]
         else:
-            mapping = {"0": 0, "1": 1, "2": 2}
-            self.labels = [mapping.get(tok, -1) for tok in self.labels_raw]
+            def _safe_label(v):
+                try:
+                    return int(v)
+                except Exception:
+                    return 3
+
+            self.labels = [_safe_label(lbl) for lbl in self.labels_raw]
 
         # Transforms
         if self.augment:

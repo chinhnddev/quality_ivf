@@ -1,6 +1,6 @@
 # TE task config
 task: te
-num_classes: 3
+num_classes: 4
 label_col: TE
-label_valid_set: [0,1,2]
+label_valid_set: [0,1,2,3]
 masking: mask_invalid

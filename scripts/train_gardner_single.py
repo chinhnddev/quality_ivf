@@ -446,6 +446,8 @@ def train_one_run(cfg, args) -> None:
     label_counts_after = Counter(ds_train.df["norm_label"])
     print(f"[DATA FILTER] {task.upper()} train after filtering: {len(ds_train)} samples; val: {len(ds_val)} samples")
     print(f"  Train label counts: {dict(sorted(label_counts_after.items()))}")
+    val_label_counts = Counter(ds_val.df["norm_label"])
+    print(f"  Val label counts:   {dict(sorted(val_label_counts.items()))}")
     print(f"num_classes=", num_classes)
 
     # Collect train labels (after filtering) for class weights
