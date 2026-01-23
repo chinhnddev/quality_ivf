@@ -362,6 +362,8 @@ def main():
     y_pred: List[int] = []
     used_images: List[str] = []
 
+    initial_total = None
+    removed_nd_na = 0
     if task == "exp":
         # Evaluate EXP on ALL gold_test images, mapping NA/invalid to class 5
         for _, r in preds_df.iterrows():
@@ -406,8 +408,27 @@ def main():
             y_true.append(gt)
             y_pred.append(pr)
             used_images.append(str(r["Image"]))
-        eval_num_classes = 4  # 0..3
+        initial_total = len(y_true)
+        filtered = []
+        for gt, pr, img in zip(y_true, y_pred, used_images):
+            if gt in {0, 1, 2}:
+                filtered.append((gt, pr, img))
+        removed = initial_total - len(filtered)
+        if initial_total:
+            print(
+                f"[ICM/TE] Trimmed {removed}/{initial_total} ({removed/initial_total:.2%}) ND/NA samples "
+                f"before computing 3-class metrics."
+            )
+        if filtered:
+            y_true, y_pred, used_images = zip(*filtered)
+            y_true = list(y_true)
+            y_pred = list(y_pred)
+        else:
+            y_true, y_pred = [], []
+            used_images = []
+        eval_num_classes = 3  # 0..2
         labels = list(range(eval_num_classes))
+        removed_nd_na = removed
 
     # Metrics (same names as Table 2 intent)
     acc = accuracy_score(y_true, y_pred)
@@ -437,6 +458,8 @@ def main():
     print("Per-class recall:", per_rec.tolist())
 
     # Save
+    n_eval_total_before = initial_total if initial_total is not None else len(y_true)
+    filtered_ratio = removed_nd_na / n_eval_total_before if n_eval_total_before else 0.0
     out = {
         "task": task,
         "split": args.split,
@@ -445,6 +468,9 @@ def main():
         "device": str(device),
         "n_total_split_rows": int(len(split_df)),
         "n_eval_used": int(len(y_true)),
+        "n_eval_total_before_filter": int(n_eval_total_before),
+        "n_filtered_nd_na": int(removed_nd_na),
+        "filtered_ratio": float(filtered_ratio),
         "eval_label_space": labels,
         "accuracy": float(acc),
         "avg-prec": float(avg_prec),
@@ -471,6 +497,11 @@ def main():
         f"Evaluation complete | task={task} | split={args.split} | n_eval_used={len(y_true)} | "
         f"accuracy={acc:.4f} | avg-prec={avg_prec:.4f} | avg-rec={avg_rec:.4f} | avg-f1={avg_f1:.4f}"
     )
+    if task in {"icm", "te"} and removed_nd_na:
+        print(
+            f"[ICM/TE] Removed ND/NA from metrics: {removed_nd_na}/{n_eval_total_before} "
+            f"({filtered_ratio:.2%}) excluded; coverage uses {len(y_true)} samples."
+        )
 
 
 if __name__ == "__main__":
