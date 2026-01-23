@@ -200,13 +200,13 @@ class GardnerDataset(Dataset):
             df["norm_label"] = df[label_col].apply(normalize_icm_te_token)
 
         # Filtering rule:
-        # - train/val: filter for ICM/TE valid labels {0,1,2}; EXP keeps all
+        # - train/val: filter for ICM/TE valid labels {0,1,2,3}; EXP keeps all
         # - test: do NOT filter (load all); masking is for eval script
         if split in {"train", "val"}:
             if label_col == "EXP":
                 df = df[df["norm_label"].isin({"0", "1", "2", "3", "4"})].copy()
             else:
-                df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
+                df = df[df["norm_label"].isin({"0", "1", "2", "3"})].copy()
         elif split == "test":
             pass
         else:
@@ -322,7 +322,7 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
             else:
                 print(f"[VAL DEBUG] task={task} epoch={epoch} y_true empty")
             print(f"[VAL DEBUG] y_pred counts: {dict(sorted(y_pred_counts.items()))}")
-        assert set(unique_labels).issubset({0, 1, 2}), "ICM/TE val contains invalid labels after filtering"
+        assert set(unique_labels).issubset({0, 1, 2, 3}), "ICM/TE val contains invalid labels after filtering"
 
     return {
         "acc": float(acc),

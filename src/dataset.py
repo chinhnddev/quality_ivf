@@ -52,7 +52,7 @@ class GardnerDataset(Dataset):
             df["norm_label"] = df["EXP"].apply(normalize_exp_token)
         elif self.task in {"icm", "te"}:
             df["norm_label"] = df[self.task.upper()].apply(normalize_icm_te_token)
-            df["norm_label"] = df["norm_label"].apply(lambda tok: int(tok) if tok in {"0", "1", "2"} else 3)
+            df["norm_label"] = df["norm_label"].apply(lambda tok: int(tok) if tok in {"0", "1", "2", "3"} else 3)
         else:
             raise ValueError(f"Unknown task: {self.task}")
 

@@ -73,32 +73,30 @@ def normalize_exp_token(x) -> str:
 
 def normalize_icm_te_token(x) -> str:
     """
-    Normalize ICM/TE to one of '0','1','2','ND','NA'.
-    Numeric -1 -> 'NA', 3 -> 'ND', invalid -> 'ND'.
+    Normalize ICM/TE to one of '0','1','2','3'.
+    Numeric -1, 3, or invalid inputs map to '3' (non-assessable).
     """
     if pd.isna(x):
-        return "ND"
+        return "3"
     try:
         if isinstance(x, (int, np.integer)):
             val = int(x)
         elif isinstance(x, (float, np.floating)):
             if np.isnan(x):
-                return "ND"
+                return "3"
             val = int(float(x))
         else:
             val = int(float(str(x).strip()))
         if val == -1:
-            return "NA"
-        if val == 3:
-            return "ND"
-        if val in {0, 1, 2}:
+            return "3"
+        if val in {0, 1, 2, 3}:
             return str(val)
     except Exception:
         pass
     text = str(x).strip().upper()
-    if text in {"ND", "NA"}:
-        return text
-    return "ND"
+    if text in {"ND", "NA", ""}:
+        return "3"
+    return "3"
 
 
 def normalize_token(x) -> str:
@@ -162,13 +160,16 @@ def print_label_distribution(
         raw_unique = sorted({val if val != "" else "<EMPTY>" for val in raw_vals.unique()})
         tokens = df[label_col].apply(normalize_icm_te_token)
         total = len(tokens)
-        valid = tokens.isin(["0", "1", "2"]).sum()
-        nd = (tokens == "ND").sum()
-        na = (tokens == "NA").sum()
+        valid_mask = tokens.isin(["0", "1", "2", "3"])
+        valid = valid_mask.sum()
+        not_assessable = (tokens == "3").sum()
         print(f"{label_col} raw unique values: {raw_unique}")
-        print(f"{label_col}: total={total}, valid(0/1/2)={valid}, ND={nd}, NA={na}")
-        valid_counts = tokens[tokens.isin(["0", "1", "2"])].value_counts().sort_index()
-        print("Valid distribution:", valid_counts.to_dict())
+        print(
+            f"{label_col}: total={total}, valid(0/1/2/3)={valid}, "
+            f"not_assessable_count={not_assessable}"
+        )
+        valid_counts = tokens[valid_mask].value_counts().sort_index()
+        print("Label distribution (0-3):", valid_counts.to_dict())
 
 
 # ============================================================
