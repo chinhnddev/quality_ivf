@@ -4,3 +4,16 @@ num_classes: 4
 label_col: TE
 label_valid_set: [0,1,2,3]
 masking: mask_invalid
+augmentation:
+  horizontal_flip: true
+  vertical_flip: false
+  rotation_deg: 5
+loss:
+  label_smoothing: 0.05
+swa:
+  use: false
+scheduler:
+  warmup_epochs: 0
+  warmup_lr: 0.0
+model:
+  dropout: 0.1

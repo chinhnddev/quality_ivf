@@ -164,7 +164,7 @@ def make_loss_fn(
             loss = FocalLoss(gamma=2.0, weight=weights if use_class_weights else None)
             metadata["loss_name"] = "focal"
             return loss, metadata
-        loss = nn.CrossEntropyLoss(weight=weights)
+        loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=float(label_smoothing))
         metadata["loss_name"] = "cross_entropy"
         return loss, metadata
     raise ValueError(f"Unknown track: {track}")
@@ -220,42 +220,65 @@ class GardnerDataset(Dataset):
             raise ValueError(f"Unknown split: {split}")
 
         self.df = df.reset_index(drop=True)
+        self.augmentation_cfg = augmentation_cfg or {}
 
         # Transforms
-        self.transform = self._build_transform(augmentation_cfg, sanity_mode)
+        self.transform = self._build_transform(self.augmentation_cfg, sanity_mode)
         
     def _build_transform(self, aug: Optional[dict], sanity_mode: bool = False):
+        aug_cfg = {}
+        if aug:
+            if isinstance(aug, dict):
+                aug_cfg.update(aug)
+            else:
+                try:
+                    aug_cfg.update(dict(aug))
+                except Exception:
+                    aug_cfg.update({k: aug[k] for k in aug})
+
+        base_defaults = {"rotation_deg": 10, "horizontal_flip": True, "vertical_flip": True}
+        task_overrides = {}
+        if self.task in {"icm", "te"}:
+            task_overrides = {"rotation_deg": 5, "horizontal_flip": True, "vertical_flip": False}
+        transform_cfg = {**base_defaults, **task_overrides, **aug_cfg}
+
+        def _bool(key, default):
+            return bool(transform_cfg.get(key, default))
+
+        rotation_deg = float(transform_cfg.get("rotation_deg", 0))
+        horizontal_flip = _bool("horizontal_flip", True)
+        vertical_flip = _bool("vertical_flip", True)
+
+        norm = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
         if self.split == "train" and not sanity_mode:
-            transform = transforms.Compose([
+            pipeline = [
                 transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomVerticalFlip(p=0.5),
-                transforms.RandomRotation(degrees=15),
+            ]
+            if horizontal_flip:
+                pipeline.append(transforms.RandomHorizontalFlip(p=0.5))
+            if vertical_flip:
+                pipeline.append(transforms.RandomVerticalFlip(p=0.5))
+            if rotation_deg > 0:
+                pipeline.append(transforms.RandomRotation(degrees=rotation_deg))
+            pipeline.extend([
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                norm,
             ])
-            print(f"TRAIN transform pipeline: {transform}")
+            transform = transforms.Compose(pipeline)
+            print(f"[TRANSFORM] task={self.task} split={self.split} pipeline={transform}")
             return transform
 
         # val/test/sanity: deterministic
-        if sanity_mode:
-            transform = transforms.Compose([
-                transforms.Resize(224),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ])
-            print(f"SANITY transform pipeline: {transform}")
-            return transform
-        else:
-            transform = transforms.Compose([
-                transforms.Resize(224),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ])
-            print(f"VAL/TEST transform pipeline: {transform}")
-            return transform
+        deterministic = transforms.Compose([
+            transforms.Resize(224),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            norm,
+        ])
+        label = "SANITY" if sanity_mode else "VAL/TEST"
+        print(f"[TRANSFORM] task={self.task} split={self.split} pipeline={deterministic} ({label})")
+        return deterministic
 
     def __len__(self):
         return len(self.df)
@@ -476,23 +499,26 @@ def train_one_run(cfg, args) -> None:
     # Define flags early
     use_class_weights = bool(cfg.use_class_weights)
     use_weighted_sampler = bool(args.use_weighted_sampler)
-    if task in {"icm", "te"} and use_class_weights and use_weighted_sampler:
-        print("[WARN] ICM/TE running with sampler AND class weights; disabling class weights to avoid double weighting.")
-        print("  Recommended default: use_weighted_sampler=0, use_class_weights=1, loss=CrossEntropyLoss")
+    if use_weighted_sampler and use_class_weights:
+        print("[WARN] WeightedRandomSampler enabled; disabling class weights to avoid double weighting.")
         use_class_weights = False
     use_icm_focal = bool(getattr(args, "icm_use_focal", 0))
-    if task in {"icm", "te"} and use_class_weights and use_weighted_sampler:
-        print("[WARN] ICM/TE running with sampler AND class weights; disabling class weights to avoid double weighting.")
-        print("  Recommended default: use_weighted_sampler=0, use_class_weights=1, loss=CrossEntropyLoss")
+    if task in {"icm", "te"}:
+        if use_class_weights:
+            print("[INFO] ICM/TE tasks disable class weights by default.")
+        if use_icm_focal:
+            print("[INFO] ICM/TE tasks force focal loss OFF.")
         use_class_weights = False
-    if task in {"icm", "te"} and use_class_weights and use_weighted_sampler:
-        print("[WARN] ICM/TE running with both class weights and weighted sampler; disabling sampler to avoid double weighting.")
-        print("  Recommended default: use_class_weights=1, use_weighted_sampler=0, loss=CrossEntropyLoss")
-        use_weighted_sampler = False
+        use_icm_focal = False
     use_coral = bool(args.use_coral) and task == "exp"
     label_smoothing_cfg = float(getattr(cfg.loss, "label_smoothing", 0.0)) if hasattr(cfg, "loss") else 0.0
+    if task in {"icm", "te"}:
+        label_smoothing_cfg = 0.05
 
-    loss_name = "CORAL_BCEWithLogits" if use_coral and task == "exp" else ("CrossEntropyLoss" if task == "exp" else "FocalLoss")
+    if task == "exp":
+        loss_name = "CORAL_BCEWithLogits" if use_coral else "CrossEntropyLoss"
+    else:
+        loss_name = "CrossEntropyLoss"
     applied_smoothing = 0.0
     if not use_coral and task == "exp" and not (use_weighted_sampler or sanity_mode):
         applied_smoothing = label_smoothing_cfg
@@ -506,7 +532,7 @@ def train_one_run(cfg, args) -> None:
     if task == "exp":
         print(f"  label_smoothing={applied_smoothing}")
     else:
-        print(f"  focal_gamma=2.0")
+        print(f"  label_smoothing={label_smoothing_cfg} (CrossEntropyLoss)")
 
     # WeightedRandomSampler setup and logging at startup
     sampler = None
@@ -719,9 +745,15 @@ def train_one_run(cfg, args) -> None:
     epochs = int(cfg.train.epochs)
     warmup_epochs = int(getattr(scheduler_cfg, 'warmup_epochs', 0))
     warmup_lr = float(getattr(scheduler_cfg, 'warmup_lr', 0.0))
+    if task in {"icm", "te"}:
+        warmup_epochs = 0
+        warmup_lr = 0.0
     warmup_scale = warmup_lr / lr if lr > 0 else 0.0
     warmup_scale = min(max(warmup_scale, 0.0), 1.0)
     use_swa = bool(getattr(swa_cfg, "use", False))
+    if task in {"icm", "te"} and use_swa:
+        print("[INFO] Disabling SWA for ICM/TE training.")
+        use_swa = False
     swa_start_epoch = int(getattr(swa_cfg, "start_epoch", epochs + 1))
     swa_start_epoch = max(1, min(swa_start_epoch, epochs))
     swa_lr = float(getattr(swa_cfg, "lr", lr))
