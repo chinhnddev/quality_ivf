@@ -196,6 +196,7 @@ class GardnerDataset(Dataset):
         image_size: int = 224,
         augmentation_cfg: Optional[dict] = None,
         sanity_mode: bool = False,
+        exclude_na_nd: bool = False,
     ):
         self.csv_path = csv_path
         self.images_root = images_root
@@ -214,7 +215,7 @@ class GardnerDataset(Dataset):
         if label_col == "EXP":
             df["norm_label"] = df["EXP"].apply(normalize_exp_token)
         else:
-            df["norm_label"] = df[label_col].apply(normalize_icm_te_token)
+            df["norm_label"] = df[label_col].apply(normalize_icm_te_token).astype(int)
 
         # Filtering rule:
         # - train/val: filter for ICM/TE valid labels {0,1,2,3}; EXP keeps all
@@ -223,7 +224,9 @@ class GardnerDataset(Dataset):
             if label_col == "EXP":
                 df = df[df["norm_label"].isin({"0", "1", "2", "3", "4"})].copy()
             else:
-                df = df[df["norm_label"].isin({"0", "1", "2", "3"})].copy()
+                df = df[df["norm_label"].isin({0, 1, 2, 3})].copy()
+                if exclude_na_nd and split == "train":
+                    df = df[df["norm_label"] != 3]
         elif split == "test":
             pass
         else:
@@ -254,7 +257,7 @@ class GardnerDataset(Dataset):
             "rrc_scale": [0.8, 1.0],
             "rrc_ratio": [0.9, 1.1],
         }
-        icm_defaults = {
+        icm_te_defaults = {
             "rotation_deg": 0,
             "horizontal_flip": False,
             "vertical_flip": False,
@@ -263,9 +266,11 @@ class GardnerDataset(Dataset):
             "icm_rrc_ratio": [0.95, 1.05],
             "icm_rotation_deg": 0,
             "icm_hflip_p": 0.0,
+            "random_resized_crop": False,
         }
-        if self.task == "icm":
-            transform_cfg = {**base_defaults, **icm_defaults, **aug_cfg}
+        is_icm_te = self.task in {"icm", "te"}
+        if is_icm_te:
+            transform_cfg = {**base_defaults, **icm_te_defaults, **aug_cfg}
         else:
             transform_cfg = {**base_defaults, **aug_cfg}
 
@@ -282,7 +287,7 @@ class GardnerDataset(Dataset):
         rrc_ratio = _to_tuple(transform_cfg.get("rrc_ratio", [0.9, 1.1]))
         hflip_prob = 0.5 if horizontal_flip_flag else 0.0
 
-        if self.task == "icm":
+        if is_icm_te:
             rotation_deg = float(transform_cfg.get("icm_rotation_deg", rotation_deg))
             hflip_prob = float(transform_cfg.get("icm_hflip_p", 0.0))
             use_rrc = bool(transform_cfg.get("icm_train_use_rrc", False))
@@ -295,6 +300,18 @@ class GardnerDataset(Dataset):
         norm = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
         if self.split == "train" and not sanity_mode:
+            if is_icm_te:
+                pipeline = [
+                    transforms.Resize(224),
+                    transforms.CenterCrop(224),
+                ]
+                jitter_cfg = transform_cfg.get("icm_photometric_jitter") or transform_cfg.get("photometric_jitter")
+                if jitter_cfg:
+                    pipeline.append(transforms.ColorJitter(**dict(jitter_cfg)))
+                pipeline.extend([transforms.ToTensor(), norm])
+                transform = transforms.Compose(pipeline)
+                print(f"[TRANSFORM] task={self.task} split={self.split} pipeline={transform}")
+                return transform
             pipeline = []
             if use_rrc:
                 pipeline.append(
@@ -511,6 +528,7 @@ def train_one_run(cfg, args) -> None:
         image_size=int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size),
         augmentation_cfg=cfg.augmentation if "augmentation" in cfg else {},
         sanity_mode=sanity_mode,
+        exclude_na_nd=bool(getattr(cfg, "train_icmte_exclude_na_nd", False)),
     )
     ds_val = GardnerDataset(
         csv_path=val_csv,
@@ -1248,6 +1266,8 @@ def main():
                         help="Maximum ratio between largest and smallest sampling weight.")
     parser.add_argument("--icm_merge_class2_to", type=int, choices=[1, 3], default=None,
                         help="Merge ICM class2 into class 1 or 3 during training (reduces num_classes).")
+    parser.add_argument("--train_icmte_exclude_na_nd", type=int, choices=[0, 1], default=0,
+                        help="Drop class 3 (NA/ND) from the ICM/TE training split when enabled.")
     parser.add_argument("--monitor_metric", type=str, default=None,
                         help="Metric key to monitor for best checkpoint (default weighted F1 for ICM/TE, macro F1 for EXP).")
 
@@ -1315,6 +1335,9 @@ def main():
         cfg.use_class_weights = bool(args.use_class_weights)
     if args.use_weighted_sampler is not None:
         cfg.use_weighted_sampler = bool(args.use_weighted_sampler)
+    cfg.train_icmte_exclude_na_nd = bool(getattr(cfg, "train_icmte_exclude_na_nd", False))
+    if args.train_icmte_exclude_na_nd is not None:
+        cfg.train_icmte_exclude_na_nd = bool(args.train_icmte_exclude_na_nd)
     if args.lr is not None:
         cfg.optimizer.lr = args.lr
     if args.warmup_lr is not None:
