@@ -4,12 +4,16 @@ num_classes: 4
 label_col: ICM
 label_valid_set: [0,1,2,3]
 masking: mask_invalid
+use_weighted_sampler: true
+use_class_weights: false
 augmentation:
-  horizontal_flip: true
-  vertical_flip: false
-  rotation_deg: 5
+  icm_train_use_rrc: false
+  icm_rrc_scale: [0.90, 1.00]
+  icm_rrc_ratio: [0.95, 1.05]
+  icm_rotation_deg: 0
+  icm_hflip_p: 0.0
 loss:
-  label_smoothing: 0.05
+  label_smoothing: 0.0
 swa:
   use: false
 scheduler:

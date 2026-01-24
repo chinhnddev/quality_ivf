@@ -56,6 +56,8 @@ augmentation:
   horizontal_flip: true
   vertical_flip: true
   color_jitter: false        # IMPORTANT: off by default (microscope images)
+  rrc_scale: [0.8, 1.0]
+  rrc_ratio: [0.9, 1.1]
 
 # Model (IVF-EffiMorphPP)
 model:

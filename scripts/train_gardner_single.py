@@ -228,54 +228,90 @@ class GardnerDataset(Dataset):
     def _build_transform(self, aug: Optional[dict], sanity_mode: bool = False):
         aug_cfg = {}
         if aug:
-            if isinstance(aug, dict):
-                aug_cfg.update(aug)
-            else:
-                try:
-                    aug_cfg.update(dict(aug))
-                except Exception:
+            try:
+                aug_cfg.update(dict(aug))
+            except Exception:
+                if isinstance(aug, dict):
+                    aug_cfg.update(aug)
+                else:
                     aug_cfg.update({k: aug[k] for k in aug})
 
-        base_defaults = {"rotation_deg": 10, "horizontal_flip": True, "vertical_flip": True}
-        task_overrides = {}
-        if self.task in {"icm", "te"}:
-            task_overrides = {"rotation_deg": 5, "horizontal_flip": True, "vertical_flip": False}
-        transform_cfg = {**base_defaults, **task_overrides, **aug_cfg}
+        base_defaults = {
+            "rotation_deg": 10,
+            "horizontal_flip": True,
+            "vertical_flip": True,
+            "random_resized_crop": True,
+            "rrc_scale": [0.8, 1.0],
+            "rrc_ratio": [0.9, 1.1],
+        }
+        icm_defaults = {
+            "rotation_deg": 0,
+            "horizontal_flip": False,
+            "vertical_flip": False,
+            "icm_train_use_rrc": False,
+            "icm_rrc_scale": [0.90, 1.00],
+            "icm_rrc_ratio": [0.95, 1.05],
+            "icm_rotation_deg": 0,
+            "icm_hflip_p": 0.0,
+        }
+        if self.task == "icm":
+            transform_cfg = {**base_defaults, **icm_defaults, **aug_cfg}
+        else:
+            transform_cfg = {**base_defaults, **aug_cfg}
 
-        def _bool(key, default):
-            return bool(transform_cfg.get(key, default))
+        def _to_tuple(value):
+            if isinstance(value, (list, tuple)):
+                return tuple(value)
+            return tuple(value) if hasattr(value, "__iter__") else tuple([value])
 
         rotation_deg = float(transform_cfg.get("rotation_deg", 0))
-        horizontal_flip = _bool("horizontal_flip", True)
-        vertical_flip = _bool("vertical_flip", True)
+        horizontal_flip_flag = bool(transform_cfg.get("horizontal_flip", True))
+        vertical_flip_flag = bool(transform_cfg.get("vertical_flip", True))
+        use_rrc = bool(transform_cfg.get("random_resized_crop", True))
+        rrc_scale = _to_tuple(transform_cfg.get("rrc_scale", [0.8, 1.0]))
+        rrc_ratio = _to_tuple(transform_cfg.get("rrc_ratio", [0.9, 1.1]))
+        hflip_prob = 0.5 if horizontal_flip_flag else 0.0
+
+        if self.task == "icm":
+            rotation_deg = float(transform_cfg.get("icm_rotation_deg", rotation_deg))
+            hflip_prob = float(transform_cfg.get("icm_hflip_p", 0.0))
+            use_rrc = bool(transform_cfg.get("icm_train_use_rrc", False))
+            rrc_scale = _to_tuple(transform_cfg.get("icm_rrc_scale", [0.90, 1.00]))
+            rrc_ratio = _to_tuple(transform_cfg.get("icm_rrc_ratio", [0.95, 1.05]))
+            vertical_flip_flag = False
+            if not transform_cfg.get("random_resized_crop", True):
+                use_rrc = False
 
         norm = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
         if self.split == "train" and not sanity_mode:
-            pipeline = [
-                transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
-            ]
-            if horizontal_flip:
-                pipeline.append(transforms.RandomHorizontalFlip(p=0.5))
-            if vertical_flip:
+            pipeline = []
+            if use_rrc:
+                pipeline.append(
+                    transforms.RandomResizedCrop(224, scale=rrc_scale, ratio=rrc_ratio)
+                )
+            else:
+                pipeline.append(transforms.Resize(224))
+                pipeline.append(transforms.CenterCrop(224))
+            if hflip_prob > 0.0:
+                pipeline.append(transforms.RandomHorizontalFlip(p=hflip_prob))
+            if vertical_flip_flag:
                 pipeline.append(transforms.RandomVerticalFlip(p=0.5))
             if rotation_deg > 0:
                 pipeline.append(transforms.RandomRotation(degrees=rotation_deg))
-            pipeline.extend([
-                transforms.ToTensor(),
-                norm,
-            ])
+            pipeline.extend([transforms.ToTensor(), norm])
             transform = transforms.Compose(pipeline)
             print(f"[TRANSFORM] task={self.task} split={self.split} pipeline={transform}")
             return transform
 
-        # val/test/sanity: deterministic
-        deterministic = transforms.Compose([
-            transforms.Resize(224),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            norm,
-        ])
+        deterministic = transforms.Compose(
+            [
+                transforms.Resize(224),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                norm,
+            ]
+        )
         label = "SANITY" if sanity_mode else "VAL/TEST"
         print(f"[TRANSFORM] task={self.task} split={self.split} pipeline={deterministic} ({label})")
         return deterministic
@@ -498,7 +534,9 @@ def train_one_run(cfg, args) -> None:
 
     # Define flags early
     use_class_weights = bool(cfg.use_class_weights)
-    use_weighted_sampler = bool(args.use_weighted_sampler)
+    use_weighted_sampler = bool(getattr(cfg, "use_weighted_sampler", False))
+    if args.use_weighted_sampler is not None:
+        use_weighted_sampler = bool(args.use_weighted_sampler)
     if use_weighted_sampler and use_class_weights:
         print("[WARN] WeightedRandomSampler enabled; disabling class weights to avoid double weighting.")
         use_class_weights = False
@@ -512,16 +550,15 @@ def train_one_run(cfg, args) -> None:
         use_icm_focal = False
     use_coral = bool(args.use_coral) and task == "exp"
     label_smoothing_cfg = float(getattr(cfg.loss, "label_smoothing", 0.0)) if hasattr(cfg, "loss") else 0.0
-    if task in {"icm", "te"}:
-        label_smoothing_cfg = 0.05
 
     if task == "exp":
         loss_name = "CORAL_BCEWithLogits" if use_coral else "CrossEntropyLoss"
     else:
         loss_name = "CrossEntropyLoss"
     applied_smoothing = 0.0
-    if not use_coral and task == "exp" and not (use_weighted_sampler or sanity_mode):
-        applied_smoothing = label_smoothing_cfg
+    applied_smoothing = label_smoothing_cfg
+    if not use_coral and task == "exp" and (use_weighted_sampler or sanity_mode):
+        applied_smoothing = 0.0
 
     print(f"[CONFIG] use_class_weights={use_class_weights}, use_weighted_sampler={use_weighted_sampler}")
     # Startup diagnostics
@@ -532,30 +569,44 @@ def train_one_run(cfg, args) -> None:
     if task == "exp":
         print(f"  label_smoothing={applied_smoothing}")
     else:
-        print(f"  label_smoothing={label_smoothing_cfg} (CrossEntropyLoss)")
+        print(f"  label_smoothing={applied_smoothing} (CrossEntropyLoss)")
 
     # WeightedRandomSampler setup and logging at startup
     sampler = None
 
     if use_weighted_sampler:
         alpha = float(getattr(cfg.train, "sampler_alpha", 0.5))  # default 0.5
-
         sample_weights = []
+        class_sampling_weights = {}
+        for cls, count in sorted(label_counts.items()):
+            weight = (1.0 / count) ** alpha if count > 0 else 0.0
+            class_sampling_weights[int(cls)] = float(weight)
         for y in train_labels:
-            c = label_counts[int(y)]
-            w = (1.0 / c) ** alpha
-            sample_weights.append(w)
+            sample_weights.append(class_sampling_weights[int(y)])
+
+        weight_tensor = torch.tensor(sample_weights, dtype=torch.double)
+        stats = {
+            "min": float(weight_tensor.min()),
+            "max": float(weight_tensor.max()),
+            "mean": float(weight_tensor.mean()),
+        }
+        total_class_weight = sum(class_sampling_weights.values())
+        normalized_sampling = {
+            cls: float(weight / total_class_weight) if total_class_weight > 0 else 0.0
+            for cls, weight in class_sampling_weights.items()
+        }
 
         sampler = WeightedRandomSampler(
-            weights=torch.tensor(sample_weights, dtype=torch.double),
+            weights=weight_tensor,
             num_samples=len(sample_weights),
-            replacement=True
+            replacement=True,
         )
 
         print("Using WeightedRandomSampler")
-        print(f"Class counts: {dict(sorted(label_counts.items()))}")
-        print(f"Class weights: {dict(sorted({cls: 1.0 / count for cls, count in label_counts.items()}.items()))}")
-        print(f"Sample weights (first 10): {sample_weights[:10]}")
+        print(f"  Class counts: {dict(sorted(label_counts.items()))}")
+        print(f"  Sample weight stats: {stats}")
+        print(f"  Per-class sampling weights (normalized): {normalized_sampling}")
+        print(f"  Sample weights (first 10): {weight_tensor[:10].tolist()}")
 
     # Warning if both are enabled
     if use_weighted_sampler and use_class_weights:
@@ -918,6 +969,8 @@ def train_one_run(cfg, args) -> None:
         swa_model.to(device)
         print(f"[SWA] AveragedModel ready | swa_lr={swa_lr} | start_epoch={swa_start_epoch}")
 
+    collapse_dominant_class = None
+    collapse_run_len = 0
     # Training loop (simple)
     for epoch in range(1, epochs + 1):
         model.train()
@@ -954,6 +1007,34 @@ def train_one_run(cfg, args) -> None:
             f"val_avg_rec={val_metrics['avg_recall_weighted']:.4f} "
             f"val_avg_f1={val_metrics['avg_f1_weighted']:.4f}"
         )
+        if task == "icm":
+            per_class_recall = val_metrics.get("per_class_recall", [])
+            if per_class_recall:
+                recall_summary = ", ".join(f"{cls}:{rec:.3f}" for cls, rec in enumerate(per_class_recall))
+                print(f"  Val per-class recall: {recall_summary}")
+            y_pred_counts = val_metrics.get("y_pred_counts", {})
+            total_preds = sum(y_pred_counts.values())
+            if total_preds:
+                dominant_cls = max(y_pred_counts, key=y_pred_counts.get)
+                dominant_ratio = y_pred_counts[dominant_cls] / total_preds
+                if dominant_ratio > 0.9:
+                    if dominant_cls == collapse_dominant_class:
+                        collapse_run_len += 1
+                    else:
+                        collapse_dominant_class = dominant_cls
+                        collapse_run_len = 1
+                else:
+                    collapse_dominant_class = None
+                    collapse_run_len = 0
+                if collapse_run_len >= 3:
+                    print(
+                        "[WARN] Val predictions dominated by class "
+                        f"{collapse_dominant_class} ({dominant_ratio:.0%}) for "
+                        f"{collapse_run_len} consecutive epochs."
+                    )
+            else:
+                collapse_dominant_class = None
+                collapse_run_len = 0
         if task in {"icm", "te"}:
             class_range = range(4)
             y_pred_counts_full = {cls: val_metrics["y_pred_counts"].get(cls, 0) for cls in class_range}
