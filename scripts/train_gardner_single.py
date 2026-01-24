@@ -131,6 +131,13 @@ def make_loss_fn(
     weights = None
     if use_class_weights:
         weights = compute_class_weights(train_labels, num_classes)
+        # Clip extreme weights for stability
+        clipped = torch.clamp(weights, max=10.0)
+        if not torch.equal(weights, clipped):
+            weights = clipped
+            print(f"[LOSS] Clipped class weights (max=10.0): {weights.tolist()}")
+        else:
+            print(f"[LOSS] Class weights (<=10.0): {weights.tolist()}")
         # Warning if any missing class
         if (weights == 0).any():
             missing = [i for i, w in enumerate(weights.tolist()) if w == 0.0]
@@ -675,7 +682,12 @@ def train_one_run(cfg, args) -> None:
         loss_fn = loss_fn.to(device)
     monitor_metric_label = getattr(args, "monitor_metric", None)
     if monitor_metric_label is None:
-        monitor_metric_label = "avg_f1_weighted" if task in {"icm", "te"} else "macro_f1"
+        monitor_cfg = getattr(cfg, "monitor", None)
+        config_metric = getattr(monitor_cfg, "metric", None) if monitor_cfg is not None else None
+        if config_metric is not None:
+            monitor_metric_label = str(config_metric)
+    if monitor_metric_label is None:
+        monitor_metric_label = "macro_f1" if task in {"icm", "te"} else "macro_f1"
     monitor_metric_key = monitor_metric_label
     if monitor_metric_key.startswith("val_"):
         monitor_metric_key = monitor_metric_key[len("val_") :]

@@ -534,42 +534,45 @@ def main():
         initial_total = total_matched
         if len(icm_gt_list) != len(te_gt_list):
             print("[ICM/TE] WARNING: inconsistent ICM/TE list lengths after filtering.")
-        icm_accuracy = 0.0
-        icm_avg_prec = 0.0
-        icm_avg_rec = 0.0
-        icm_avg_f1 = 0.0
-        if icm_gt_list:
-            icm_accuracy = float(accuracy_score(icm_gt_list, icm_pred_list))
-            icm_avg_prec = float(
-                precision_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
-            )
-            icm_avg_rec = float(
-                recall_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
-            )
-            icm_avg_f1 = float(
-                f1_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
-            )
-        icm_metrics = {
-            "accuracy": icm_accuracy,
-            "avg-prec": icm_avg_prec,
-            "avg-rec": icm_avg_rec,
-            "avg-f1": icm_avg_f1,
-        }
-        te_metrics = _build_task_metrics(te_gt_list, te_pred_list, labels, total_matched, skipped_due_to_exp_rule)
+        icm_metrics = None
+        te_metrics = None
         print(
             f"[ICM/TE] total_matched={total_matched}, skipped_due_to_exp_rule={skipped_due_to_exp_rule}, "
             f"n_eval_used_icm={len(icm_gt_list)}, n_eval_used_te={len(te_gt_list)}"
         )
-        print(
-            f"[ICM] accuracy={icm_accuracy:.4f} | avg-prec={icm_avg_prec:.4f} | "
-            f"avg-rec={icm_avg_rec:.4f} | avg-f1={icm_avg_f1:.4f}"
-        )
-        print("Confusion Matrix (TE):")
-        print(te_metrics["confusion_matrix"])
-        print("Per-class recall (TE):", te_metrics["per_class_recall"])
+        if task == "icm":
+            icm_accuracy = 0.0
+            icm_avg_prec = 0.0
+            icm_avg_rec = 0.0
+            icm_avg_f1 = 0.0
+            if icm_gt_list:
+                icm_accuracy = float(accuracy_score(icm_gt_list, icm_pred_list))
+                icm_avg_prec = float(
+                    precision_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
+                )
+                icm_avg_rec = float(
+                    recall_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
+                )
+                icm_avg_f1 = float(
+                    f1_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
+                )
+            icm_metrics = _build_task_metrics(icm_gt_list, icm_pred_list, labels, total_matched, skipped_due_to_exp_rule)
+            print(
+                f"[ICM] accuracy={icm_accuracy:.4f} | avg-prec={icm_avg_prec:.4f} | "
+                f"avg-rec={icm_avg_rec:.4f} | avg-f1={icm_avg_f1:.4f}"
+            )
+            print("Confusion Matrix (ICM):")
+            print(icm_metrics["confusion_matrix"])
+            print("Per-class recall (ICM):", icm_metrics["per_class_recall"])
+        else:
+            te_metrics = _build_task_metrics(te_gt_list, te_pred_list, labels, total_matched, skipped_due_to_exp_rule)
+            print("Confusion Matrix (TE):")
+            print(te_metrics["confusion_matrix"])
+            print("Per-class recall (TE):", te_metrics["per_class_recall"])
 
         n_eval_total_before = initial_total
         filtered_ratio = removed_nd_na / n_eval_total_before if n_eval_total_before else 0.0
+        n_eval_used = len(icm_gt_list) if task == "icm" else len(te_gt_list)
         metrics_payload = {
             "task": task,
             "split": args.split,
@@ -577,21 +580,26 @@ def main():
             "seed": args.seed,
             "device": str(device),
             "n_total_split_rows": int(len(split_df)),
-            "n_eval_used": int(len(icm_gt_list)),
-            "n_eval_used_icm": int(len(icm_gt_list)),
-            "n_eval_used_te": int(len(te_gt_list)),
+            "n_eval_used": int(n_eval_used),
             "n_eval_total_before_filter": int(n_eval_total_before) if n_eval_total_before is not None else 0,
             "n_filtered_nd_na": int(removed_nd_na),
             "filtered_ratio": float(filtered_ratio),
             "eval_label_space": labels,
-            "icm": icm_metrics,
-            "te": te_metrics,
         }
-        summary_msg = (
-            f"Evaluation complete | task={task} | split={args.split} | "
-            f"n_eval_used_icm={len(icm_gt_list)} | accuracy_icm={icm_metrics['accuracy']:.4f} | "
-            f"n_eval_used_te={len(te_gt_list)} | accuracy_te={te_metrics['accuracy']:.4f}"
-        )
+        if task == "icm":
+            metrics_payload["n_eval_used_icm"] = int(len(icm_gt_list))
+            metrics_payload["icm"] = icm_metrics
+            summary_msg = (
+                f"Evaluation complete | task={task} | split={args.split} | "
+                f"n_eval_used_icm={len(icm_gt_list)} | accuracy_icm={icm_metrics['accuracy']:.4f}"
+            )
+        else:
+            metrics_payload["n_eval_used_te"] = int(len(te_gt_list))
+            metrics_payload["te"] = te_metrics
+            summary_msg = (
+                f"Evaluation complete | task={task} | split={args.split} | "
+                f"n_eval_used_te={len(te_gt_list)} | accuracy_te={te_metrics['accuracy']:.4f}"
+            )
 
     with open(metrics_file, "w", encoding="utf-8") as f:
         json.dump(metrics_payload, f, indent=2, ensure_ascii=False)
