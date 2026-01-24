@@ -6,6 +6,10 @@ label_valid_set: [0,1,2,3]
 masking: mask_invalid
 use_weighted_sampler: true
 use_class_weights: false
+sampling:
+  use_sqrt_inverse: true
+  cap_ratio: 5.0
+icm_merge_class2_to: null
 augmentation:
   icm_train_use_rrc: false
   icm_rrc_scale: [0.90, 1.00]

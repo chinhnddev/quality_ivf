@@ -39,6 +39,10 @@ scheduler:
   warmup_epochs: 5
   warmup_lr: 0.000001
 
+sampling:
+  use_sqrt_inverse: false
+  cap_ratio: 5.0
+
 swa:
   use: true
   start_epoch: 30

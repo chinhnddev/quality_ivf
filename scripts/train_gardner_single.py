@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from collections import Counter
+from collections import Counter, defaultdict
 from omegaconf import OmegaConf
 from sklearn.metrics import (
     accuracy_score,
@@ -173,6 +174,15 @@ def make_loss_fn(
 # =========================
 # Dataset
 # =========================
+
+def build_icm_merge_map(merge_to: int) -> Tuple[Dict[int, int], Dict[int, int]]:
+    base = {0: 0, 1: 1, 2: merge_to, 3: 3}
+    unique = sorted(set(base.values()))
+    new_idx = {label: idx for idx, label in enumerate(unique)}
+    final_map = {orig: new_idx[base[orig]] for orig in base}
+    reverse_map = {idx: label for label, idx in new_idx.items()}
+    return final_map, reverse_map
+
 
 class GardnerDataset(Dataset):
     def __init__(
@@ -514,6 +524,32 @@ def train_one_run(cfg, args) -> None:
         sanity_mode=False,
     )
 
+    merge_target = None
+    merge_info = {}
+    if task == "icm":
+        merge_target = getattr(cfg, "icm_merge_class2_to", None)
+        if args.icm_merge_class2_to is not None:
+            merge_target = args.icm_merge_class2_to
+        if merge_target not in (None, 1, 3):
+            if merge_target is not None:
+                raise ValueError("icm_merge_class2_to must be 1 or 3 when set.")
+        if merge_target is not None:
+            final_map, reverse_map = build_icm_merge_map(merge_target)
+            for ds in (ds_train, ds_val):
+                ds.df["norm_label"] = (
+                    ds.df["norm_label"]
+                    .astype(int)
+                    .map(final_map)
+                    .fillna(max(final_map.values()))
+                    .astype(int)
+                )
+            num_classes = len(reverse_map)
+            merge_info = {
+                "merge_target": merge_target,
+                "label_map": final_map,
+                "reverse_map": reverse_map,
+            }
+            print(f"[ICM MERGE] class2 -> {merge_target}; resulting labels: {sorted(reverse_map.values())}")
     label_counts_after = Counter(ds_train.df["norm_label"])
     print(f"[DATA FILTER] {task.upper()} train after filtering: {len(ds_train)} samples; val: {len(ds_val)} samples")
     print(f"  Train label counts: {dict(sorted(label_counts_after.items()))}")
@@ -537,6 +573,15 @@ def train_one_run(cfg, args) -> None:
     use_weighted_sampler = bool(getattr(cfg, "use_weighted_sampler", False))
     if args.use_weighted_sampler is not None:
         use_weighted_sampler = bool(args.use_weighted_sampler)
+    sampling_cfg = getattr(cfg, "sampling", {})
+    sampler_use_sqrt_inv = bool(sampling_cfg.get("use_sqrt_inverse", False))
+    sampler_cap_ratio = float(sampling_cfg.get("cap_ratio", 5.0))
+    if task in {"icm", "te"}:
+        sampler_use_sqrt_inv = True
+    if args.sampler_use_sqrt_inv is not None:
+        sampler_use_sqrt_inv = bool(args.sampler_use_sqrt_inv)
+    if args.sampler_cap_ratio is not None:
+        sampler_cap_ratio = float(args.sampler_cap_ratio)
     if use_weighted_sampler and use_class_weights:
         print("[WARN] WeightedRandomSampler enabled; disabling class weights to avoid double weighting.")
         use_class_weights = False
@@ -576,24 +621,33 @@ def train_one_run(cfg, args) -> None:
 
     if use_weighted_sampler:
         alpha = float(getattr(cfg.train, "sampler_alpha", 0.5))  # default 0.5
-        sample_weights = []
         class_sampling_weights = {}
         for cls, count in sorted(label_counts.items()):
-            weight = (1.0 / count) ** alpha if count > 0 else 0.0
-            class_sampling_weights[int(cls)] = float(weight)
-        for y in train_labels:
-            sample_weights.append(class_sampling_weights[int(y)])
+            if count > 0:
+                base = 1.0 / (math.sqrt(count) if sampler_use_sqrt_inv else count)
+            else:
+                base = 0.0
+            class_sampling_weights[int(cls)] = float(base ** alpha if alpha != 1.0 else base)
+        valid_weights = [w for w in class_sampling_weights.values() if w > 0]
+        if valid_weights:
+            min_w = min(valid_weights)
+            max_allowed = sampler_cap_ratio * min_w
+            current_max = max(valid_weights)
+            if current_max > max_allowed and min_w > 0.0:
+                scale = max_allowed / current_max
+                for cls in class_sampling_weights:
+                    class_sampling_weights[cls] *= scale
+        normalized = {}
+        total_weight = sum(class_sampling_weights.values())
+        for cls, weight in class_sampling_weights.items():
+            normalized[cls] = float(weight / total_weight) if total_weight > 0 else 0.0
 
+        sample_weights = [class_sampling_weights[int(y)] for y in train_labels]
         weight_tensor = torch.tensor(sample_weights, dtype=torch.double)
         stats = {
-            "min": float(weight_tensor.min()),
-            "max": float(weight_tensor.max()),
-            "mean": float(weight_tensor.mean()),
-        }
-        total_class_weight = sum(class_sampling_weights.values())
-        normalized_sampling = {
-            cls: float(weight / total_class_weight) if total_class_weight > 0 else 0.0
-            for cls, weight in class_sampling_weights.items()
+            "min": float(weight_tensor.min()) if len(weight_tensor) else 0.0,
+            "max": float(weight_tensor.max()) if len(weight_tensor) else 0.0,
+            "mean": float(weight_tensor.mean()) if len(weight_tensor) else 0.0,
         }
 
         sampler = WeightedRandomSampler(
@@ -603,9 +657,10 @@ def train_one_run(cfg, args) -> None:
         )
 
         print("Using WeightedRandomSampler")
+        print(f"  sampler_use_sqrt_inv={sampler_use_sqrt_inv}, cap_ratio={sampler_cap_ratio}")
         print(f"  Class counts: {dict(sorted(label_counts.items()))}")
-        print(f"  Sample weight stats: {stats}")
-        print(f"  Per-class sampling weights (normalized): {normalized_sampling}")
+        print(f"  Sampling weights stats: {stats}")
+        print(f"  Per-class sampling weights (normalized): {normalized}")
         print(f"  Sample weights (first 10): {weight_tensor[:10].tolist()}")
 
     # Warning if both are enabled
@@ -971,12 +1026,14 @@ def train_one_run(cfg, args) -> None:
 
     collapse_dominant_class = None
     collapse_run_len = 0
+    zero_val_recall_runs = defaultdict(int)
     # Training loop (simple)
     for epoch in range(1, epochs + 1):
         model.train()
         running = 0.0
         n = 0
         scheduler_active = not (use_swa and epoch >= swa_start_epoch)
+        train_pred_counts = Counter()
         for batch in dl_train:
             if len(batch) == 4:
                 x, y, _, _ = batch
@@ -989,12 +1046,17 @@ def train_one_run(cfg, args) -> None:
             loss = loss_fn(logits, y)
             loss.backward()
             opt.step()
+            if epoch <= 5:
+                preds = logits.argmax(dim=1).detach().cpu().tolist()
+                train_pred_counts.update(preds)
             if scheduler_active:
                 scheduler.step()  # Update LR after each batch
             running += loss.item() * x.size(0)
             n += x.size(0)
 
         train_loss = running / max(n, 1)
+        if epoch <= 5:
+            print(f"  Train y_pred counts: {dict(sorted(train_pred_counts.items()))}")
 
         # val
         val_metrics = evaluate_on_val(model, dl_val, device, task, epoch, use_coral)
@@ -1012,6 +1074,16 @@ def train_one_run(cfg, args) -> None:
             if per_class_recall:
                 recall_summary = ", ".join(f"{cls}:{rec:.3f}" for cls, rec in enumerate(per_class_recall))
                 print(f"  Val per-class recall: {recall_summary}")
+                per_class_support = val_metrics.get("per_class_support", [])
+                for cls_idx, rec in enumerate(per_class_recall):
+                    support = per_class_support[cls_idx] if cls_idx < len(per_class_support) else 0
+                    skip_zero = cls_idx == 2 and support < 5
+                    if rec == 0 and not skip_zero:
+                        zero_val_recall_runs[cls_idx] += 1
+                        if zero_val_recall_runs[cls_idx] >= 3:
+                            print(f"[WARN] Val recall for class {cls_idx} stayed at zero for {zero_val_recall_runs[cls_idx]} epochs.")
+                    else:
+                        zero_val_recall_runs[cls_idx] = 0
             y_pred_counts = val_metrics.get("y_pred_counts", {})
             total_preds = sum(y_pred_counts.values())
             if total_preds:
@@ -1046,10 +1118,15 @@ def train_one_run(cfg, args) -> None:
         if monitor > best_metric:
             best_metric = monitor
             best_epoch = epoch
-            torch.save({"state_dict": model.state_dict(),
-                        "task": task, "track": track,
-                        "num_classes": num_classes,
-                        "label_col": label_col}, best_path)
+            ckpt_payload = {
+                "state_dict": model.state_dict(),
+                "task": task,
+                "track": track,
+                "num_classes": num_classes,
+                "label_col": label_col,
+            }
+            ckpt_payload.update(merge_info)
+            torch.save(ckpt_payload, best_path)
             with open(metrics_val_path, "w", encoding="utf-8") as f:
                 json.dump({"best_epoch": epoch, "best_val": val_metrics}, f, indent=2)
             print(
@@ -1165,6 +1242,12 @@ def main():
     parser.add_argument("--use_coral", type=int, default=0, help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
     parser.add_argument("--icm_use_focal", type=int, choices=[0, 1], default=0,
                         help="Use focal loss for ICM/TE runs when track=improved (default 0).")
+    parser.add_argument("--sampler_use_sqrt_inv", type=int, choices=[0, 1], default=None,
+                        help="Override sampling weights to use sqrt inverse frequency (1=ON, 0=OFF).")
+    parser.add_argument("--sampler_cap_ratio", type=float, default=None,
+                        help="Maximum ratio between largest and smallest sampling weight.")
+    parser.add_argument("--icm_merge_class2_to", type=int, choices=[1, 3], default=None,
+                        help="Merge ICM class2 into class 1 or 3 during training (reduces num_classes).")
     parser.add_argument("--monitor_metric", type=str, default=None,
                         help="Metric key to monitor for best checkpoint (default weighted F1 for ICM/TE, macro F1 for EXP).")
 

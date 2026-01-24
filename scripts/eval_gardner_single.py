@@ -117,9 +117,12 @@ def map_exp_gold_value(v: str) -> int:
     return int(token) if token in {"0", "1", "2", "3", "4"} else 5
 
 
-def map_icm_te_gold_value(v: str) -> int:
+def map_icm_te_gold_value(v: str, merge_map: Optional[dict] = None) -> int:
     token = normalize_icm_te_token(v)
-    return int(token) if token in {"0", "1", "2"} else 3
+    base = int(token) if token in {"0", "1", "2"} else 3
+    if merge_map:
+        return merge_map.get(base, merge_map.get(3, base))
+    return base
 
 
 def map_pred_icm_te(v: int) -> int:
@@ -287,6 +290,10 @@ def main():
     state_dict, ckpt_meta = load_state_dict_robust(args.checkpoint, device)
     default_num_classes = 5 if args.task == "exp" else 3
     train_num_classes = ckpt_meta.get("num_classes", default_num_classes)
+    icm_merge_map_raw = ckpt_meta.get("label_map")
+    icm_merge_map = None
+    if icm_merge_map_raw:
+        icm_merge_map = {int(k): int(v) for k, v in icm_merge_map_raw.items()}
     if train_num_classes is None:
         train_num_classes = default_num_classes
     print(f"[EVAL] task={args.task} | train_num_classes={train_num_classes}")
@@ -525,12 +532,12 @@ def main():
             if skip_exp:
                 skipped_due_to_exp_rule += 1
                 continue
-            icm_gt_list.append(map_icm_te_gold_value(r["ICM"]))
+            icm_gt_list.append(map_icm_te_gold_value(r["ICM"], merge_map=icm_merge_map))
             te_gt_list.append(map_icm_te_gold_value(r["TE"]))
             pred_label = map_pred_icm_te(int(r["y_pred_raw"]))
             icm_pred_list.append(pred_label)
             te_pred_list.append(pred_label)
-        labels = list(range(4))
+        labels = list(range(train_num_classes))
         initial_total = total_matched
         if len(icm_gt_list) != len(te_gt_list):
             print("[ICM/TE] WARNING: inconsistent ICM/TE list lengths after filtering.")
