@@ -27,6 +27,10 @@ loss:
 swa:
   use: false
 
+monitor:
+  icm: val_weighted_f1
+  te: val_weighted_f1
+
 scheduler:
   warmup_epochs: 0
   warmup_lr: 0.0

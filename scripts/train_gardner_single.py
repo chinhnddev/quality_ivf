@@ -43,6 +43,43 @@ from src.loss_coral import coral_loss, coral_predict_class
 from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_distribution
 
 
+def _extract_monitor_from_cfg(cfg: Optional[OmegaConf], task: str) -> Optional[str]:
+    if cfg is None or not hasattr(cfg, "monitor"):
+        return None
+    monitor_cfg = getattr(cfg, "monitor")
+    if monitor_cfg is None:
+        return None
+    if isinstance(monitor_cfg, str):
+        return monitor_cfg
+    container = OmegaConf.to_container(monitor_cfg, resolve=True) if OmegaConf.is_config(monitor_cfg) else monitor_cfg
+    if isinstance(container, dict):
+        value = container.get(task)
+        if value:
+            return str(value)
+    return None
+
+
+def _monitor_key_from_label(label: str) -> str:
+    if label.startswith("val_"):
+        return label[len("val_") :]
+    return label
+
+
+def _resolve_monitor(
+    task: str, base_cfg: OmegaConf, track_cfg: OmegaConf, task_cfg: OmegaConf
+) -> Tuple[str, str]:
+    for cfg, source in (
+        (task_cfg, "task_cfg"),
+        (track_cfg, "track_cfg"),
+        (base_cfg, "base_cfg"),
+    ):
+        value = _extract_monitor_from_cfg(cfg, task)
+        if value:
+            return value, source
+    default = "val_acc" if task == "exp" else "val_macro_f1"
+    return default, "default"
+
+
 # =========================
 # Checkpoint Loading
 # =========================
@@ -860,17 +897,15 @@ def train_one_run(cfg, args) -> None:
                            use_focal=use_icm_focal)
     if isinstance(loss_fn, nn.Module):
         loss_fn = loss_fn.to(device)
-    monitor_metric_label = getattr(args, "monitor_metric", None)
+    monitor_metric_label = getattr(cfg, "monitor_label", None)
+    monitor_source = getattr(cfg, "monitor_source", "default") or "default"
     if monitor_metric_label is None:
-        monitor_cfg = getattr(cfg, "monitor", None)
-        config_metric = getattr(monitor_cfg, "metric", None) if monitor_cfg is not None else None
-        if config_metric is not None:
-            monitor_metric_label = str(config_metric)
-    if monitor_metric_label is None:
-        monitor_metric_label = "macro_f1" if task in {"icm", "te"} else "macro_f1"
-    monitor_metric_key = monitor_metric_label
-    if monitor_metric_key.startswith("val_"):
-        monitor_metric_key = monitor_metric_key[len("val_") :]
+        monitor_metric_label = "val_macro_f1" if task in {"icm", "te"} else "val_acc"
+    monitor_metric_key = _monitor_key_from_label(monitor_metric_label)
+    print(
+        f"[MONITOR] task={task} resolved monitor={monitor_metric_label} "
+        f"key={monitor_metric_key} source={monitor_source}"
+    )
     if task in {"icm", "te"}:
         print(
             f"[ICM/TE] monitor={monitor_metric_label} (key={monitor_metric_key}), "
@@ -1335,7 +1370,10 @@ def main():
 
     args = parser.parse_args()
 
-    cfg = load_and_merge_cfg(args.config, args.task_cfg, args.track_cfg)
+    cfg_base = OmegaConf.load(args.config)
+    cfg_task = OmegaConf.load(args.task_cfg)
+    cfg_track = OmegaConf.load(args.track_cfg)
+    cfg = OmegaConf.merge(cfg_base, cfg_task, cfg_track)
 
     if "scheduler" not in cfg:
         cfg.scheduler = OmegaConf.create({})
@@ -1365,6 +1403,12 @@ def main():
         cfg.use_class_weights = bool(args.use_class_weights)
     if args.use_weighted_sampler is not None:
         cfg.use_weighted_sampler = bool(args.use_weighted_sampler)
+    monitor_label = args.monitor_metric
+    monitor_source = "cli" if monitor_label else None
+    if monitor_label is None:
+        monitor_label, monitor_source = _resolve_monitor(cfg.task, cfg_base, cfg_track, cfg_task)
+    cfg.monitor_label = monitor_label
+    cfg.monitor_source = monitor_source or "default"
     cfg.train_icmte_exclude_na_nd = bool(getattr(cfg, "train_icmte_exclude_na_nd", False))
     if args.train_icmte_exclude_na_nd is not None:
         cfg.train_icmte_exclude_na_nd = bool(args.train_icmte_exclude_na_nd)
