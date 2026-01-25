@@ -1,0 +1,137 @@
+# ============================================================
+# Base configuration for Gardner EXP (CORAL / Ordinal)
+# Separate from CE to avoid artifact mismatch
+# ============================================================
+
+# Reproducibility
+seed: 42
+deterministic: true
+
+# Paths
+splits_dir: splits
+images_root: data/blastocyst_Dataset/Images
+out_dir: outputs_coral        # ⚠️ QUAN TRỌNG: tách khỏi outputs CE
+
+# Data
+data:
+  image_col: Image
+  exp_col: EXP
+  icm_col: ICM
+  te_col: TE
+  image_size: 224
+  num_workers: 2
+
+# Training
+train:
+  epochs: 60
+  batch_size: 64
+  precision: 32
+  gradient_clip_val: 0.0
+
+# Optimization
+optimizer:
+  name: adam
+  lr: 5.0e-4
+  weight_decay: 0.0
+
+scheduler:
+  name: cosine
+  warmup_epochs: 5
+  warmup_lr: 0.000001
+
+# Sampling (OFF by default – bật sau nếu cần)
+sampling:
+  use_sqrt_inverse: false
+  cap_ratio: 5.0
+
+# SWA (khuyến nghị giữ ON)
+swa:
+  use: true
+  start_epoch: 30
+  lr: 0.00025
+
+# CORAL threshold tuning (BẮT BUỘC cho CORAL)
+coral_tuning:
+  tune: true
+  thr_min: 0.30
+  thr_max: 0.70
+  thr_step: 0.01
+
+# Augmentation (train only)
+augmentation:
+  random_resized_crop: true
+  rotation_deg: 10
+  horizontal_flip: true
+  vertical_flip: true
+  color_jitter: false
+  rrc_scale: [0.8, 1.0]
+  rrc_ratio: [0.9, 1.1]
+
+# ============================================================
+# Model (IVF-EffiMorphPP + CORAL)
+# ============================================================
+model:
+  name: ivf_effimorphpp
+  pretrained: false
+  dropout: 0.3
+
+  # Capacity (đã test ổn)
+  width_mult: 1.2
+  depth_mult: 1.0
+  base_channels: 32
+
+  use_xception_mid: true
+  use_gem: true
+  use_late_mhsa: false
+
+  head_mlp: false
+  head_hidden_dim: null
+  head_dropout: 0.0
+
+  # ⚠️ CORAL FLAG
+  use_coral: true
+
+# ============================================================
+# Loss (CORAL – ordinal regression)
+# ============================================================
+loss:
+  name: coral
+  label_smoothing: 0.0
+
+# Class weights (KHUYẾN NGHỊ bật cho CORAL)
+use_class_weights: true
+
+loss:
+  name: coral
+  class_weight_mode: effective_num
+  class_weight_beta: 0.999
+  class_weight_cap: 10.0
+
+# ============================================================
+# Metrics
+# ============================================================
+metrics:
+  primary: macro_f1
+  compute_confusion_matrix: true
+
+# ============================================================
+# Validation / checkpointing
+# ============================================================
+monitor:
+  metric: val_macro_f1        # ⚠️ QUAN TRỌNG: KHÔNG dùng val_acc
+  mode: max
+  patience: 10
+
+checkpoint:
+  save_best_only: true
+  save_last: false
+
+# Logging
+logging:
+  log_every_n_steps: 50
+  enable_progress_bar: true
+
+# Sanity checks
+sanity_checks:
+  print_label_distribution: true
+  assert_valid_labels: true
