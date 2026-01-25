@@ -1,6 +1,6 @@
 # TE task config
 task: te
-num_classes: 4
+num_classes: 3
 label_col: TE
 label_valid_set: [0,1,2,3]
 masking: mask_invalid
@@ -23,4 +23,4 @@ scheduler:
 model:
   dropout: 0.1
 monitor:
-  te: val_weighted_f1
+  te: val_macro_f1

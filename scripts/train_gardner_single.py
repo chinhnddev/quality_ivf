@@ -42,6 +42,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.loss_coral import coral_loss, coral_predict_class
 from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_distribution
 
+IGNORE_INDEX = -100
+
 
 def _extract_monitor_from_cfg(cfg: Optional[OmegaConf], task: str) -> Optional[str]:
     if cfg is None or not hasattr(cfg, "monitor"):
@@ -180,12 +182,27 @@ def _dictify_loss_cfg(loss_cfg: Optional[Union[dict, OmegaConf]]) -> Dict[str, A
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, gamma: float = 2.0, weight: Optional[torch.Tensor] = None):
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        weight: Optional[torch.Tensor] = None,
+        ignore_index: Optional[int] = None,
+    ):
         super().__init__()
         self.gamma = gamma
         self.register_buffer("weight", weight if weight is not None else None)
+        self.ignore_index = ignore_index
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        original_device = logits.device
+        original_dtype = logits.dtype
+        mask = None
+        if self.ignore_index is not None:
+            mask = target != self.ignore_index
+            if not mask.any():
+                return torch.zeros((), device=original_device, dtype=original_dtype)
+            logits = logits[mask]
+            target = target[mask]
         ce = nn.functional.cross_entropy(logits, target, weight=self.weight, reduction="none")
         pt = torch.exp(-ce)
         loss = ((1 - pt) ** self.gamma) * ce
@@ -232,9 +249,10 @@ def make_loss_fn(
     loss_params = _dictify_loss_cfg(loss_cfg)
     loss_name = loss_params.get("name", "cross_entropy")
 
+    ignore_idx = IGNORE_INDEX if task in {"icm", "te"} else None
     if track == "benchmark_fair":
         smoothing = 0.0 if use_weighted_sampler or sanity_mode else 0.0
-        loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
+        loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing, ignore_index=ignore_idx)
         metadata["loss_name"] = "cross_entropy"
         return loss, metadata
     if track == "improved":
@@ -249,10 +267,18 @@ def make_loss_fn(
         if loss_name == "focal":
             gamma = float(loss_params.get("focal_gamma", 2.2))
             metadata["focal_gamma"] = gamma
-            loss = FocalLoss(gamma=gamma, weight=weights if use_class_weights else None)
+            loss = FocalLoss(
+                gamma=gamma,
+                weight=weights if use_class_weights else None,
+                ignore_index=ignore_idx,
+            )
             metadata["loss_name"] = "focal"
             return loss, metadata
-        loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=float(label_smoothing))
+        loss = nn.CrossEntropyLoss(
+            weight=weights,
+            label_smoothing=float(label_smoothing),
+            ignore_index=ignore_idx,
+        )
         metadata["loss_name"] = loss_name
         return loss, metadata
     raise ValueError(f"Unknown track: {track}")
@@ -318,6 +344,13 @@ class GardnerDataset(Dataset):
             pass
         else:
             raise ValueError(f"Unknown split: {split}")
+
+        if label_col != "EXP" and self.task in {"icm", "te"}:
+            df["target_label"] = df["norm_label"].apply(
+                lambda x: IGNORE_INDEX if x == 3 else int(x)
+            )
+        else:
+            df["target_label"] = df["norm_label"].astype(int)
 
         self.df = df.reset_index(drop=True)
         self.augmentation_cfg = augmentation_cfg or {}
@@ -473,7 +506,7 @@ class GardnerDataset(Dataset):
         img = Image.open(img_path).convert("RGB")
         x = self.transform(img)
 
-        y = int(row["norm_label"])
+        y = int(row["target_label"])
 
         return x, y, img_name
 
@@ -483,11 +516,18 @@ class GardnerDataset(Dataset):
 # =========================
 
 @torch.no_grad()
-def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, task: str, epoch: int, use_coral: bool = False) -> Dict:
+def evaluate_on_val(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    task: str,
+    epoch: int,
+    use_coral: bool = False,
+    num_classes: int = 0,
+) -> Dict:
     model.eval()
     ys, ps = [], []
     for batch in loader:
-        # Handle both 3 and 4 element tuples from dataset
         if len(batch) == 4:
             x, y, _, _ = batch
         else:
@@ -495,44 +535,63 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
         x = x.to(device)
         logits = model(x)
         if use_coral:
-            pred = coral_predict_class(logits).cpu().numpy().tolist()
+            preds = coral_predict_class(logits).cpu()
         else:
-            pred = logits.argmax(dim=1).cpu().numpy().tolist()
-        ys.extend(y.numpy().tolist())
-        ps.extend(pred)
-    ys_tensor = torch.tensor(ys)
-    acc = accuracy_score(ys, ps) if len(ys) else 0.0
-    macro_f1 = f1_score(ys, ps, average="macro") if len(ys) else 0.0
-    weighted_f1 = f1_score(ys, ps, average="weighted") if len(ys) else 0.0
-    avg_precision_weighted = (
-        precision_score(ys, ps, average="weighted", zero_division=0) if len(ys) else 0.0
-    )
-    avg_recall_weighted = (
-        recall_score(ys, ps, average="weighted", zero_division=0) if len(ys) else 0.0
-    )
-    avg_f1_weighted = (
-        f1_score(ys, ps, average="weighted", zero_division=0) if len(ys) else 0.0
+            preds = logits.argmax(dim=1).cpu()
+        y = y.cpu()
+        mask = y != IGNORE_INDEX
+        if not mask.any():
+            continue
+        ys.extend(y[mask].tolist())
+        ps.extend(preds[mask].tolist())
+    if not ys:
+        empty_metrics = {
+            "acc": 0.0,
+            "macro_f1": 0.0,
+            "weighted_f1": 0.0,
+            "avg_precision_weighted": 0.0,
+            "avg_recall_weighted": 0.0,
+            "avg_f1_weighted": 0.0,
+            "per_class_precision": [0.0 for _ in range(max(num_classes, 1))],
+            "per_class_recall": [0.0 for _ in range(max(num_classes, 1))],
+            "per_class_f1": [0.0 for _ in range(max(num_classes, 1))],
+            "per_class_support": [0 for _ in range(max(num_classes, 1))],
+            "y_pred_counts": {},
+            "y_pred_ratios": {},
+            "y_true_counts": {},
+            "y_true_ratios": {},
+        }
+        return empty_metrics
+    acc = accuracy_score(ys, ps)
+    macro_f1 = f1_score(ys, ps, average="macro")
+    weighted_f1 = f1_score(ys, ps, average="weighted")
+    avg_precision_weighted = precision_score(ys, ps, average="weighted", zero_division=0)
+    avg_recall_weighted = recall_score(ys, ps, average="weighted", zero_division=0)
+    avg_f1_weighted = f1_score(ys, ps, average="weighted", zero_division=0)
+
+    labels = list(range(num_classes if num_classes > 0 else len(set(ys))))
+    precision, recall, f1, support = precision_recall_fscore_support(
+        ys, ps, labels=labels, average=None, zero_division=0
     )
 
-    # Per-class metrics
-    precision, recall, f1, support = precision_recall_fscore_support(ys, ps, average=None, zero_division=0)
-
-    # y_pred distribution
     y_pred_counts = Counter(ps)
-    total_samples = max(1, len(ps))
-    y_pred_ratios = {cls: count / total_samples for cls, count in y_pred_counts.items()}
+    total_preds = len(ps)
+    y_pred_ratios = {cls: float(count / total_preds) for cls, count in y_pred_counts.items()}
     y_true_counts = Counter(ys)
-    y_true_ratios = {cls: count / total_samples for cls, count in y_true_counts.items()}
+    y_true_ratios = {cls: float(count / total_preds) for cls, count in y_true_counts.items()}
 
     if task in {"icm", "te"}:
         unique_labels = sorted(set(ys))
         if epoch == 1:
             if unique_labels:
-                print(f"[VAL DEBUG] task={task} epoch={epoch} y_true unique={unique_labels} min={min(unique_labels)} max={max(unique_labels)}")
+                print(
+                    f"[VAL DEBUG] task={task} epoch={epoch} y_true unique={unique_labels} "
+                    f"min={min(unique_labels)} max={max(unique_labels)}"
+                )
             else:
                 print(f"[VAL DEBUG] task={task} epoch={epoch} y_true empty")
             print(f"[VAL DEBUG] y_pred counts: {dict(sorted(y_pred_counts.items()))}")
-        assert set(unique_labels).issubset({0, 1, 2, 3}), "ICM/TE val contains invalid labels after filtering"
+        assert set(unique_labels).issubset({0, 1, 2}), "ICM/TE val contains invalid labels after filtering"
 
     return {
         "acc": float(acc),
@@ -541,14 +600,14 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
         "avg_precision_weighted": float(avg_precision_weighted),
         "avg_recall_weighted": float(avg_recall_weighted),
         "avg_f1_weighted": float(avg_f1_weighted),
-        "per_class_precision": precision.tolist() if precision is not None else [],
-        "per_class_recall": recall.tolist() if recall is not None else [],
-        "per_class_f1": f1.tolist() if f1 is not None else [],
-        "per_class_support": support.tolist() if support is not None else [],
+        "per_class_precision": precision.tolist(),
+        "per_class_recall": recall.tolist(),
+        "per_class_f1": f1.tolist(),
+        "per_class_support": support.tolist(),
         "y_pred_counts": dict(sorted(y_pred_counts.items())),
         "y_pred_ratios": dict(sorted(y_pred_ratios.items())),
         "y_true_counts": dict(sorted(y_true_counts.items())),
-        "y_true_ratios": dict(sorted(y_true_ratios.items()))
+        "y_true_ratios": dict(sorted(y_true_ratios.items())),
     }
 
 
@@ -688,20 +747,27 @@ def train_one_run(cfg, args) -> None:
     label_counts_after = Counter(ds_train.df["norm_label"])
     print(f"[DATA FILTER] {task.upper()} train after filtering: {len(ds_train)} samples; val: {len(ds_val)} samples")
     print(f"  Train label counts: {dict(sorted(label_counts_after.items()))}")
-    val_label_counts = Counter(ds_val.df["norm_label"])
+    val_targets_full = ds_val.df["target_label"].tolist()
+    val_label_counts = Counter(y for y in val_targets_full if y != IGNORE_INDEX)
+    ignored_val = len(val_targets_full) - sum(1 for y in val_targets_full if y != IGNORE_INDEX)
     print(f"  Val label counts:   {dict(sorted(val_label_counts.items()))}")
+    print(f"  Ignored ND/NA in val: {ignored_val}")
     print(f"num_classes=", num_classes)
 
     # Collect train labels (after filtering) for class weights
-    train_labels = [int(ds_train.df["norm_label"].iloc[i]) for i in range(len(ds_train.df))]
+    train_targets_full = ds_train.df["target_label"].tolist()
+    train_labels = [int(y) for y in train_targets_full if y != IGNORE_INDEX]
 
     # Log class distribution
     label_counts = Counter(train_labels)
     print(f"\nTrain label distribution (task={task}):")
-    for cls in sorted(label_counts.keys()):
-        count = label_counts[cls]
-        pct = 100.0 * count / len(train_labels)
+    total_train_valid = len(train_labels)
+    for cls in range(num_classes):
+        count = label_counts.get(cls, 0)
+        pct = 100.0 * count / max(total_train_valid, 1)
         print(f"  Class {cls}: {count} samples ({pct:.1f}%)")
+    ignored_train = len(train_targets_full) - len(train_labels)
+    print(f"  Ignored ND/NA samples (label=3): {ignored_train}")
 
     # Define flags early
     use_class_weights = bool(cfg.use_class_weights)
@@ -750,7 +816,8 @@ def train_one_run(cfg, args) -> None:
     if use_weighted_sampler:
         alpha = float(getattr(cfg.train, "sampler_alpha", 0.5))  # default 0.5
         class_sampling_weights = {}
-        for cls, count in sorted(label_counts.items()):
+        for cls in range(num_classes):
+            count = label_counts.get(cls, 0)
             if count > 0:
                 base = 1.0 / (math.sqrt(count) if sampler_use_sqrt_inv else count)
             else:
@@ -770,7 +837,10 @@ def train_one_run(cfg, args) -> None:
         for cls, weight in class_sampling_weights.items():
             normalized[cls] = float(weight / total_weight) if total_weight > 0 else 0.0
 
-        sample_weights = [class_sampling_weights[int(y)] for y in train_labels]
+        sample_weights = [
+            class_sampling_weights.get(int(y), 0.0) if y != IGNORE_INDEX else 0.0
+            for y in train_targets_full
+        ]
         weight_tensor = torch.tensor(sample_weights, dtype=torch.double)
         stats = {
             "min": float(weight_tensor.min()) if len(weight_tensor) else 0.0,
@@ -1189,8 +1259,11 @@ def train_one_run(cfg, args) -> None:
             loss.backward()
             opt.step()
             if epoch <= 5:
-                preds = logits.argmax(dim=1).detach().cpu().tolist()
-                train_pred_counts.update(preds)
+                preds = logits.argmax(dim=1)
+                valid_mask = y != IGNORE_INDEX
+                if valid_mask.any():
+                    valid_preds = preds[valid_mask].detach().cpu().tolist()
+                    train_pred_counts.update(valid_preds)
             if scheduler_active:
                 scheduler.step()  # Update LR after each batch
             running += loss.item() * x.size(0)
@@ -1201,7 +1274,7 @@ def train_one_run(cfg, args) -> None:
             print(f"  Train y_pred counts: {dict(sorted(train_pred_counts.items()))}")
 
         # val
-        val_metrics = evaluate_on_val(model, dl_val, device, task, epoch, use_coral)
+        val_metrics = evaluate_on_val(model, dl_val, device, task, epoch, use_coral, num_classes)
         monitor = val_metrics[monitor_metric_key]
         print(
             f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f} | "
@@ -1297,7 +1370,9 @@ def train_one_run(cfg, args) -> None:
             "swa": True
         }, swa_ckpt_path)
         print(f"[SWA] Saved averaged checkpoint to {swa_ckpt_path}")
-        swa_val_metrics = evaluate_on_val(swa_model, dl_val, device, task, epoch, use_coral)
+        swa_val_metrics = evaluate_on_val(
+            swa_model, dl_val, device, task, epoch, use_coral, num_classes
+        )
         print(f"[SWA VAL] acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}")
 
     threshold_result = None

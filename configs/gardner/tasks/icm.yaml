@@ -1,6 +1,6 @@
 # ICM task config
 task: icm
-num_classes: 4
+num_classes: 3
 label_col: ICM
 label_valid_set: [0,1,2,3]
 masking: mask_invalid
@@ -30,8 +30,8 @@ swa:
   use: false
 
 monitor:
-  icm: val_weighted_f1
-  te: val_weighted_f1
+  icm: val_macro_f1
+  te: val_macro_f1
 
 scheduler:
   warmup_epochs: 0
