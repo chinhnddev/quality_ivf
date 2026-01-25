@@ -269,15 +269,12 @@ class GardnerDataset(Dataset):
             "random_resized_crop": False,
         }
         is_icm_te = self.task in {"icm", "te"}
-        if is_icm_te:
-            transform_cfg = {**base_defaults, **icm_te_defaults, **aug_cfg}
-        else:
-            transform_cfg = {**base_defaults, **aug_cfg}
+        transform_cfg = {**base_defaults, **(icm_te_defaults if is_icm_te else {}), **aug_cfg}
 
         def _to_tuple(value):
             if isinstance(value, (list, tuple)):
                 return tuple(value)
-            return tuple(value) if hasattr(value, "__iter__") else tuple([value])
+            return tuple(value) if hasattr(value, "__iter__") else (value,)
 
         rotation_deg = float(transform_cfg.get("rotation_deg", 0))
         horizontal_flip_flag = bool(transform_cfg.get("horizontal_flip", True))
@@ -294,38 +291,36 @@ class GardnerDataset(Dataset):
             rrc_scale = _to_tuple(transform_cfg.get("icm_rrc_scale", [0.90, 1.00]))
             rrc_ratio = _to_tuple(transform_cfg.get("icm_rrc_ratio", [0.95, 1.05]))
             vertical_flip_flag = False
-            if not transform_cfg.get("random_resized_crop", True):
-                use_rrc = False
+
+        # Gate RRC for non-ICM/TE tasks only (EXP etc.)
+        if (not is_icm_te) and (not transform_cfg.get("random_resized_crop", True)):
+            use_rrc = False
 
         norm = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
         if self.split == "train" and not sanity_mode:
-            if is_icm_te:
-                pipeline = [
-                    transforms.Resize(224),
-                    transforms.CenterCrop(224),
-                ]
-                jitter_cfg = transform_cfg.get("icm_photometric_jitter") or transform_cfg.get("photometric_jitter")
-                if jitter_cfg:
-                    pipeline.append(transforms.ColorJitter(**dict(jitter_cfg)))
-                pipeline.extend([transforms.ToTensor(), norm])
-                transform = transforms.Compose(pipeline)
-                print(f"[TRANSFORM] task={self.task} split={self.split} pipeline={transform}")
-                return transform
             pipeline = []
             if use_rrc:
-                pipeline.append(
-                    transforms.RandomResizedCrop(224, scale=rrc_scale, ratio=rrc_ratio)
-                )
+                pipeline.append(transforms.RandomResizedCrop(224, scale=rrc_scale, ratio=rrc_ratio))
             else:
                 pipeline.append(transforms.Resize(224))
                 pipeline.append(transforms.CenterCrop(224))
+
+            # photometric jitter
+            if is_icm_te:
+                jitter_cfg = transform_cfg.get("icm_photometric_jitter") or transform_cfg.get("photometric_jitter")
+            else:
+                jitter_cfg = transform_cfg.get("photometric_jitter")
+            if jitter_cfg:
+                pipeline.append(transforms.ColorJitter(**dict(jitter_cfg)))
+
             if hflip_prob > 0.0:
                 pipeline.append(transforms.RandomHorizontalFlip(p=hflip_prob))
             if vertical_flip_flag:
                 pipeline.append(transforms.RandomVerticalFlip(p=0.5))
             if rotation_deg > 0:
                 pipeline.append(transforms.RandomRotation(degrees=rotation_deg))
+
             pipeline.extend([transforms.ToTensor(), norm])
             transform = transforms.Compose(pipeline)
             print(f"[TRANSFORM] task={self.task} split={self.split} pipeline={transform}")

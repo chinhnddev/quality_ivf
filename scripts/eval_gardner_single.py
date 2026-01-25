@@ -6,7 +6,7 @@ import json
 import random
 from pathlib import Path
 from collections import Counter
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Iterable
 
 # Add project root to sys.path
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +30,6 @@ from sklearn.metrics import (
 from src.dataset import GardnerDataset
 from src.loss_coral import coral_predict_class
 from src.model import IVF_EffiMorphPP
-from src.paper_eval import PaperEvaluator
 from src.utils import normalize_exp_token, normalize_icm_te_token
 
 
@@ -212,50 +211,147 @@ def _resolve_consensus_csv(consensus_csv: str, splits_dir: str) -> str:
     raise FileNotFoundError(f"Consensus CSV missing at {consensus_csv} and no fallback available.")
 
 
+def _find_column_case_insensitive(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
+    lower_map = {col.lower(): col for col in df.columns}
+    for candidate in candidates:
+        normalized = candidate.lower()
+        if normalized in lower_map:
+            return lower_map[normalized]
+    return None
+
+
+def _prepare_image_df(df: pd.DataFrame, image_col: Optional[str] = None) -> pd.DataFrame:
+    if image_col is None:
+        image_col = _find_column_case_insensitive(df, ["Image", "image", "Filename", "filename"])
+    if image_col is None or image_col not in df.columns:
+        raise KeyError(f"Could not find image column in predictions DataFrame: {df.columns.tolist()}")
+    df = df.rename(columns={image_col: "Image"})
+    df = df.copy()
+    df["Image"] = df["Image"].astype(str).str.strip()
+    return df.drop_duplicates(subset=["Image"])
+
+
 def _load_paper_predictions(src_df: pd.DataFrame, pred_csv: Optional[str], out_dir: str, split: str) -> Tuple[pd.DataFrame, str]:
     default_path = os.path.join(out_dir, f"preds_{split}.csv")
     if pred_csv:
         if not os.path.exists(pred_csv):
             raise FileNotFoundError(f"Predictions CSV not found at {pred_csv}")
         print(f"[PAPER EVAL] Loading predictions from provided CSV: {pred_csv}")
-        return pd.read_csv(pred_csv), pred_csv
-    return src_df.copy(), default_path
+        preds = pd.read_csv(pred_csv)
+        preds = _prepare_image_df(preds)
+        return preds, pred_csv
+    return _prepare_image_df(src_df.copy()), default_path
 
 
 def run_paper_evaluation(
     preds_df: pd.DataFrame,
     args: argparse.Namespace,
     device: torch.device,
+    icm_merge_map: Optional[dict],
 ) -> Tuple[dict, Dict[str, str], str]:
     consensus_csv = _resolve_consensus_csv(args.consensus_csv, args.splits_dir)
     preds_source, pred_source_path = _load_paper_predictions(preds_df, args.pred_csv, args.out_dir, args.split)
-    consensus_df = pd.read_csv(consensus_csv)
-    evaluator = PaperEvaluator(
-        preds_source,
-        consensus_df,
-        task=args.task,
-        pred_csv_path=pred_source_path,
+    consensus_df_raw = pd.read_csv(consensus_csv)
+    consensus_df = _prepare_image_df(consensus_df_raw)
+    required_cols = {"EXP", "ICM", "TE"}
+    if not required_cols.issubset(set(consensus_df.columns)):
+        raise KeyError(f"Consensus CSV must include columns: {required_cols}. Got: {consensus_df.columns.tolist()}")
+    consensus_df = consensus_df.drop_duplicates(subset=["Image"])
+
+    merged = preds_source.merge(
+        consensus_df[["Image", "EXP", "ICM", "TE"]],
+        on="Image",
+        how="inner",
     )
-    metrics_payload, reports = evaluator.evaluate()
-    metrics_payload.update(
-        {
-            "task": args.task,
-            "split": args.split,
-            "checkpoint": str(args.checkpoint),
-            "seed": args.seed,
-            "device": str(device),
-            "consensus_csv": consensus_csv,
-            "eval_protocol": "paper",
+    if merged.empty:
+        raise ValueError("No matching rows between predictions and consensus CSV.")
+
+    exp_pred_series = extract_predicted_exp_series(preds_source)
+    if exp_pred_series is not None:
+        exp_pred_series = exp_pred_series.reindex(merged.index)
+        merged["exp_pred_mapped"] = exp_pred_series.apply(_normalize_exp_prediction)
+    else:
+        merged["exp_pred_mapped"] = pd.Series([None] * len(merged))
+
+    merged["EXP_gt_mapped"] = merged["EXP"].apply(map_exp_gold_value)
+    merged["ICM_gt_mapped"] = merged["ICM"].apply(lambda v: map_icm_te_gold_value(v, merge_map=icm_merge_map))
+    merged["TE_gt_mapped"] = merged["TE"].apply(map_icm_te_gold_value)
+    merged["icm_pred_mapped"] = merged["y_pred_raw"].apply(map_pred_icm_te)
+    merged["te_pred_mapped"] = merged["y_pred_raw"].apply(map_pred_icm_te)
+
+    skip_mask = merged["EXP_gt_mapped"].isin({0, 1})
+    if exp_pred_series is not None:
+        skip_mask |= merged["exp_pred_mapped"].isin({0, 1})
+    skipped_filenames = merged.loc[skip_mask, "Image"].astype(str).tolist()
+    filtered = merged.loc[~skip_mask]
+
+    reports: Dict[str, str] = {}
+    metrics: Dict[str, Any] = {
+        "eval_protocol": "paper",
+        "total_matched": int(len(merged)),
+        "skipped_due_to_exp_rule": int(skip_mask.sum()),
+        "skipped_filenames": skipped_filenames,
+        "n_total_consensus_rows": int(len(consensus_df)),
+        "n_total_pred_rows": int(len(preds_source)),
+        "pred_csv": pred_source_path,
+        "task": args.task,
+        "split": args.split,
+        "checkpoint": str(args.checkpoint),
+        "seed": args.seed,
+        "device": str(device),
+        "consensus_csv": consensus_csv,
+        "eval_protocol": "paper",
+    }
+
+    summary_parts = [
+        f"total_matched={metrics['total_matched']}",
+        f"skipped={metrics['skipped_due_to_exp_rule']}",
+    ]
+    task = args.task
+    if exp_pred_series is not None:
+        exp_labels = sorted(set(merged["EXP_gt_mapped"].tolist()) | set(merged["exp_pred_mapped"].dropna().tolist()))
+        exp_report_str = classification_report(
+            merged["EXP_gt_mapped"], merged["exp_pred_mapped"], labels=exp_labels, zero_division=0
+        )
+        exp_report_dict = classification_report(
+            merged["EXP_gt_mapped"], merged["exp_pred_mapped"], labels=exp_labels, zero_division=0, output_dict=True
+        )
+        exp_cm = confusion_matrix(merged["EXP_gt_mapped"], merged["exp_pred_mapped"], labels=exp_labels)
+        reports["exp"] = exp_report_str
+        metrics["n_eval_used_exp"] = int(len(merged))
+        metrics["exp"] = {
+            "classification_report": exp_report_dict,
+            "confusion_matrix": exp_cm.tolist(),
         }
-    )
-    summary_elements = (
-        f"total_matched={metrics_payload['total_matched']}",
-        f"skipped={metrics_payload['skipped_due_to_exp_rule']}",
-        f"n_eval_used_icm={metrics_payload.get('n_eval_used_icm')}",
-        f"n_eval_used_te={metrics_payload.get('n_eval_used_te')}",
-    )
-    summary_msg = f"Paper evaluation complete | task={args.task} | split={args.split} | " + " | ".join(summary_elements)
-    return metrics_payload, reports, summary_msg
+
+    if task in {"icm", "te"}:
+        filtered_true = (
+            filtered["ICM_gt_mapped"].tolist() if task == "icm" else filtered["TE_gt_mapped"].tolist()
+        )
+        filtered_pred = (
+            filtered["icm_pred_mapped"].tolist() if task == "icm" else filtered["te_pred_mapped"].tolist()
+        )
+        report_str = ""
+        report_dict = {}
+        cm = []
+        if filtered_true:
+            report_str = classification_report(
+                filtered_true, filtered_pred, labels=[0, 1, 2, 3], zero_division=0
+            )
+            report_dict = classification_report(
+                filtered_true, filtered_pred, labels=[0, 1, 2, 3], zero_division=0, output_dict=True
+            )
+            cm = confusion_matrix(filtered_true, filtered_pred, labels=[0, 1, 2, 3]).tolist()
+        reports[task] = report_str or f"No {task.upper()} samples after filtering."
+        metrics[f"n_eval_used_{task}"] = int(len(filtered_true))
+        metrics[task] = {
+            "classification_report": report_dict,
+            "confusion_matrix": cm,
+        }
+        summary_parts.append(f"n_eval_used_{task}={len(filtered_true)}")
+
+    summary_msg = f"Paper evaluation complete | task={args.task} | split={args.split} | " + " | ".join(summary_parts)
+    return metrics, reports, summary_msg
 
 
 def extract_predicted_exp_series(preds_df: pd.DataFrame) -> Optional[pd.Series]:
@@ -494,7 +590,7 @@ def main():
     summary_msg = ""
     paper_reports: Dict[str, str] = {}
     if args.eval_protocol == "paper":
-        metrics_payload, paper_reports, summary_msg = run_paper_evaluation(preds_df, args, device)
+        metrics_payload, paper_reports, summary_msg = run_paper_evaluation(preds_df, args, device, icm_merge_map)
         for name in ("exp", "icm", "te"):
             report = paper_reports.get(name)
             if report:
