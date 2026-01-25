@@ -97,12 +97,6 @@ metrics:
   primary: macro_f1
   compute_confusion_matrix: true
 
-# Validation / checkpointing
-monitor:
-  metric: val_macro_f1
-  mode: max
-  patience: 10
-
 checkpoint:
   save_best_only: true
   save_last: false

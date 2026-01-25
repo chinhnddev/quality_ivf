@@ -4,3 +4,8 @@ num_classes: 5
 label_col: EXP
 label_valid_set: [0,1,2,3,4]
 masking: none
+
+monitor:
+  metric: val_macro_f1
+  mode: max
+  patience: 10
