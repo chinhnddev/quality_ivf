@@ -256,18 +256,29 @@ class GardnerDataset(Dataset):
             "random_resized_crop": True,
             "rrc_scale": [0.8, 1.0],
             "rrc_ratio": [0.9, 1.1],
+            # Optional tensor-space augment (recommend OFF by default)
+            "erasing_p": 0.0,
+            "erasing_scale": [0.02, 0.10],
+            "erasing_ratio": [0.3, 1.0],
         }
+
+        # Conservative defaults for ICM/TE (light aug only)
         icm_te_defaults = {
-            "rotation_deg": 0,
+            "rotation_deg": 10,
             "horizontal_flip": False,
             "vertical_flip": False,
+            # Control RRC for ICM/TE via icm_train_use_rrc (default False)
             "icm_train_use_rrc": False,
-            "icm_rrc_scale": [0.90, 1.00],
-            "icm_rrc_ratio": [0.95, 1.05],
-            "icm_rotation_deg": 0,
+            "icm_rrc_scale": [0.95, 1.00],
+            "icm_rrc_ratio": [0.98, 1.02],
+            "icm_rotation_deg": 10,
             "icm_hflip_p": 0.0,
+            # Keep paper-style key for backward compatibility; not used to gate ICM/TE anymore
             "random_resized_crop": False,
+            # Keep erasing off unless explicitly enabled in config
+            "erasing_p": 0.0,
         }
+
         is_icm_te = self.task in {"icm", "te"}
         transform_cfg = {**base_defaults, **(icm_te_defaults if is_icm_te else {}), **aug_cfg}
 
@@ -284,15 +295,22 @@ class GardnerDataset(Dataset):
         rrc_ratio = _to_tuple(transform_cfg.get("rrc_ratio", [0.9, 1.1]))
         hflip_prob = 0.5 if horizontal_flip_flag else 0.0
 
+        erasing_p = float(transform_cfg.get("erasing_p", 0.0))
+        erasing_scale = _to_tuple(transform_cfg.get("erasing_scale", [0.02, 0.10]))
+        erasing_ratio = _to_tuple(transform_cfg.get("erasing_ratio", [0.3, 1.0]))
+
+        # Task-specific overrides for ICM/TE
         if is_icm_te:
             rotation_deg = float(transform_cfg.get("icm_rotation_deg", rotation_deg))
             hflip_prob = float(transform_cfg.get("icm_hflip_p", 0.0))
-            use_rrc = bool(transform_cfg.get("icm_train_use_rrc", False))
-            rrc_scale = _to_tuple(transform_cfg.get("icm_rrc_scale", [0.90, 1.00]))
-            rrc_ratio = _to_tuple(transform_cfg.get("icm_rrc_ratio", [0.95, 1.05]))
             vertical_flip_flag = False
 
-        # Gate RRC for non-ICM/TE tasks only (EXP etc.)
+            # For ICM/TE, RRC is controlled by icm_train_use_rrc (NOT random_resized_crop)
+            use_rrc = bool(transform_cfg.get("icm_train_use_rrc", False))
+            rrc_scale = _to_tuple(transform_cfg.get("icm_rrc_scale", [0.95, 1.00]))
+            rrc_ratio = _to_tuple(transform_cfg.get("icm_rrc_ratio", [0.98, 1.02]))
+
+        # Gate RRC for non-ICM/TE tasks only
         if (not is_icm_te) and (not transform_cfg.get("random_resized_crop", True)):
             use_rrc = False
 
@@ -300,13 +318,15 @@ class GardnerDataset(Dataset):
 
         if self.split == "train" and not sanity_mode:
             pipeline = []
+
+            # Geometric (PIL)
             if use_rrc:
                 pipeline.append(transforms.RandomResizedCrop(224, scale=rrc_scale, ratio=rrc_ratio))
             else:
                 pipeline.append(transforms.Resize(224))
                 pipeline.append(transforms.CenterCrop(224))
 
-            # photometric jitter
+            # Photometric jitter (PIL) - must be before ToTensor
             if is_icm_te:
                 jitter_cfg = transform_cfg.get("icm_photometric_jitter") or transform_cfg.get("photometric_jitter")
             else:
@@ -321,7 +341,22 @@ class GardnerDataset(Dataset):
             if rotation_deg > 0:
                 pipeline.append(transforms.RandomRotation(degrees=rotation_deg))
 
-            pipeline.extend([transforms.ToTensor(), norm])
+            # Tensor ops
+            pipeline.append(transforms.ToTensor())
+
+            # Optional RandomErasing (Tensor) - keep OFF unless explicitly enabled
+            if is_icm_te and erasing_p > 0.0:
+                pipeline.append(
+                    transforms.RandomErasing(
+                        p=erasing_p,
+                        scale=erasing_scale,
+                        ratio=erasing_ratio,
+                        value="random",
+                    )
+                )
+
+            pipeline.append(norm)
+
             transform = transforms.Compose(pipeline)
             print(f"[TRANSFORM] task={self.task} split={self.split} pipeline={transform}")
             return transform
