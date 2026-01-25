@@ -84,7 +84,7 @@ model:
   use_gem: true
   use_late_mhsa: false
 
-  head_mlp: false
+  head_mlp: true
   head_hidden_dim: null
   head_dropout: 0.0
 
@@ -102,7 +102,7 @@ loss:
   class_weight_cap: 10.0
 
 # Class weights (KHUYẾN NGHỊ bật cho CORAL)
-use_class_weights: true
+use_class_weights: false
 
 # ============================================================
 # Metrics

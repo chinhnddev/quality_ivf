@@ -76,7 +76,7 @@ model:
   mhsa_layers: 1
   mhsa_heads: 4
   use_gem: true
-  head_mlp: false
+  head_mlp: true
   head_hidden_dim: null
   head_dropout: 0.0
 
@@ -90,7 +90,7 @@ loss:
   class_weight_cap: 10.0
 
 # Class weighting (overridden by track config)
-use_class_weights: true
+use_class_weights: false
 
 # Metrics
 metrics:
