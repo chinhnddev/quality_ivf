@@ -603,6 +603,7 @@ def main():
         task = args.task
         initial_total = None
         removed_nd_na = 0
+        n_eval_total_before = 0
 
         if task == "exp":
             y_true: List[int] = []
@@ -718,6 +719,7 @@ def main():
                 if skip_exp:
                     skipped_due_to_exp_rule += 1
                     continue
+                n_eval_total_before += 1
                 icm_gt_mapped = map_icm_te_gold_value(r["ICM"], merge_map=icm_merge_map)
                 te_gt_mapped = map_icm_te_gold_value(r["TE"])
                 pred_label = map_pred_icm_te(int(r["y_pred_raw"]))
@@ -737,6 +739,7 @@ def main():
             if not labels:
                 labels = list(range(train_num_classes))
             initial_total = total_matched
+            filtered_ratio = removed_nd_na / (n_eval_total_before + 1e-9)
             if len(icm_gt_list) != len(te_gt_list):
                 print("[ICM/TE] WARNING: inconsistent ICM/TE list lengths after filtering.")
             icm_metrics = None
@@ -781,8 +784,6 @@ def main():
                 te_report = classification_report(te_gt_list, te_pred_list, labels=labels, zero_division=0)
                 print(f"TE classification report:\n{te_report}")
 
-            n_eval_total_before = initial_total
-            filtered_ratio = removed_nd_na / n_eval_total_before if n_eval_total_before else 0.0
             n_eval_used = len(icm_gt_list) if task == "icm" else len(te_gt_list)
             metrics_payload = {
                 "task": task,
