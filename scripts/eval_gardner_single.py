@@ -748,11 +748,12 @@ def main():
                 f"[ICM/TE] total_matched={total_matched}, skipped_due_to_exp_rule={skipped_due_to_exp_rule}, "
                 f"n_eval_used_icm={len(icm_gt_list)}, n_eval_used_te={len(te_gt_list)}"
             )
-        if task == "icm":
-            icm_accuracy = 0.0
-            icm_avg_prec = 0.0
-            icm_avg_rec = 0.0
-            icm_avg_f1 = 0.0
+        if task in {"icm", "te"}:
+            if task == "icm":
+                icm_accuracy = 0.0
+                icm_avg_prec = 0.0
+                icm_avg_rec = 0.0
+                icm_avg_f1 = 0.0
             if icm_gt_list:
                 icm_accuracy = float(accuracy_score(icm_gt_list, icm_pred_list))
                 icm_avg_prec = float(
@@ -775,12 +776,12 @@ def main():
             print("Per-class recall (ICM):", icm_metrics["per_class_recall"])
             if icm_gt_list:
                 print(f"ICM classification report:\n{icm_report}")
-        else:
-            te_metrics = _build_task_metrics(te_gt_list, te_pred_list, labels, total_matched, skipped_due_to_exp_rule)
-            print("Confusion Matrix (TE):")
-            print(te_metrics["confusion_matrix"])
-            print("Per-class recall (TE):", te_metrics["per_class_recall"])
-            if te_gt_list:
+            elif task == "te":
+                te_metrics = _build_task_metrics(te_gt_list, te_pred_list, labels, total_matched, skipped_due_to_exp_rule)
+                print("Confusion Matrix (TE):")
+                print(te_metrics["confusion_matrix"])
+                print("Per-class recall (TE):", te_metrics["per_class_recall"])
+                if te_gt_list:
                 te_report = classification_report(te_gt_list, te_pred_list, labels=labels, zero_division=0)
                 print(f"TE classification report:\n{te_report}")
 
