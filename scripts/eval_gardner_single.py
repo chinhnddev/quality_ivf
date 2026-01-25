@@ -19,6 +19,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from sklearn.metrics import (
     accuracy_score,
+    classification_report,
     precision_score,
     recall_score,
     f1_score,
@@ -118,17 +119,33 @@ def map_exp_gold_value(v: str) -> int:
     return int(token) if token in {"0", "1", "2", "3", "4"} else 5
 
 
+def _map_icm_te_value(value) -> int:
+    if pd.isna(value):
+        return 3
+    if isinstance(value, (int, np.integer)):
+        candidate = int(value)
+    else:
+        text = str(value).strip()
+        if text == "" or text.upper() == "NA":
+            return 3
+        if text.upper() == "ND":
+            return 3
+        try:
+            candidate = int(float(text))
+        except Exception:
+            return 3
+    return candidate if candidate in {0, 1, 2} else 3
+
+
 def map_icm_te_gold_value(v: str, merge_map: Optional[dict] = None) -> int:
-    token = normalize_icm_te_token(v)
-    base = int(token) if token in {"0", "1", "2"} else 3
+    base = _map_icm_te_value(v)
     if merge_map:
         return merge_map.get(base, merge_map.get(3, base))
     return base
 
 
 def map_pred_icm_te(v: int) -> int:
-    # If prediction is not 0/1/2 -> map to 3
-    return v if v in [0, 1, 2] else 3
+    return _map_icm_te_value(v)
 
 
 def map_pred_exp(v: int) -> int:
@@ -619,35 +636,41 @@ def main():
                 f"[ICM/TE] total_matched={total_matched}, skipped_due_to_exp_rule={skipped_due_to_exp_rule}, "
                 f"n_eval_used_icm={len(icm_gt_list)}, n_eval_used_te={len(te_gt_list)}"
             )
-            if task == "icm":
-                icm_accuracy = 0.0
-                icm_avg_prec = 0.0
-                icm_avg_rec = 0.0
-                icm_avg_f1 = 0.0
-                if icm_gt_list:
-                    icm_accuracy = float(accuracy_score(icm_gt_list, icm_pred_list))
-                    icm_avg_prec = float(
-                        precision_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
-                    )
-                    icm_avg_rec = float(
-                        recall_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
-                    )
-                    icm_avg_f1 = float(
-                        f1_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
-                    )
-                icm_metrics = _build_task_metrics(icm_gt_list, icm_pred_list, labels, total_matched, skipped_due_to_exp_rule)
-                print(
-                    f"[ICM] accuracy={icm_accuracy:.4f} | avg-prec={icm_avg_prec:.4f} | "
-                    f"avg-rec={icm_avg_rec:.4f} | avg-f1={icm_avg_f1:.4f}"
+        if task == "icm":
+            icm_accuracy = 0.0
+            icm_avg_prec = 0.0
+            icm_avg_rec = 0.0
+            icm_avg_f1 = 0.0
+            if icm_gt_list:
+                icm_accuracy = float(accuracy_score(icm_gt_list, icm_pred_list))
+                icm_avg_prec = float(
+                    precision_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
                 )
-                print("Confusion Matrix (ICM):")
-                print(icm_metrics["confusion_matrix"])
-                print("Per-class recall (ICM):", icm_metrics["per_class_recall"])
-            else:
-                te_metrics = _build_task_metrics(te_gt_list, te_pred_list, labels, total_matched, skipped_due_to_exp_rule)
-                print("Confusion Matrix (TE):")
-                print(te_metrics["confusion_matrix"])
-                print("Per-class recall (TE):", te_metrics["per_class_recall"])
+                icm_avg_rec = float(
+                    recall_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
+                )
+                icm_avg_f1 = float(
+                    f1_score(icm_gt_list, icm_pred_list, labels=labels, average="weighted", zero_division=0)
+                )
+                icm_report = classification_report(icm_gt_list, icm_pred_list, labels=labels, zero_division=0)
+            icm_metrics = _build_task_metrics(icm_gt_list, icm_pred_list, labels, total_matched, skipped_due_to_exp_rule)
+            print(
+                f"[ICM] accuracy={icm_accuracy:.4f} | avg-prec={icm_avg_prec:.4f} | "
+                f"avg-rec={icm_avg_rec:.4f} | avg-f1={icm_avg_f1:.4f}"
+            )
+            print("Confusion Matrix (ICM):")
+            print(icm_metrics["confusion_matrix"])
+            print("Per-class recall (ICM):", icm_metrics["per_class_recall"])
+            if icm_gt_list:
+                print(f"ICM classification report:\n{icm_report}")
+        else:
+            te_metrics = _build_task_metrics(te_gt_list, te_pred_list, labels, total_matched, skipped_due_to_exp_rule)
+            print("Confusion Matrix (TE):")
+            print(te_metrics["confusion_matrix"])
+            print("Per-class recall (TE):", te_metrics["per_class_recall"])
+            if te_gt_list:
+                te_report = classification_report(te_gt_list, te_pred_list, labels=labels, zero_division=0)
+                print(f"TE classification report:\n{te_report}")
 
             n_eval_total_before = initial_total
             filtered_ratio = removed_nd_na / n_eval_total_before if n_eval_total_before else 0.0
