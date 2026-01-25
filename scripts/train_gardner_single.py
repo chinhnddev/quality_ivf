@@ -8,7 +8,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -169,6 +169,16 @@ def finalize_class_weights(weights: torch.Tensor, cap_multiplier: float = 10.0, 
     return weights
 
 
+def _dictify_loss_cfg(loss_cfg: Optional[Union[dict, OmegaConf]]) -> Dict[str, Any]:
+    if loss_cfg is None:
+        return {}
+    if isinstance(loss_cfg, dict):
+        return loss_cfg
+    if OmegaConf.is_config(loss_cfg):
+        return OmegaConf.to_container(loss_cfg, resolve=True)
+    return {}
+
+
 class FocalLoss(nn.Module):
     def __init__(self, gamma: float = 2.0, weight: Optional[torch.Tensor] = None):
         super().__init__()
@@ -192,7 +202,7 @@ def make_loss_fn(
     use_weighted_sampler: bool = False,
     use_coral: bool = False,
     label_smoothing: float = 0.0,
-    focal_gamma: Optional[float] = None,
+    loss_cfg: Optional[Union[dict, OmegaConf]] = None,
     class_weight_mode: str = "inverse",
     class_weight_beta: float = 0.999,
     class_weight_cap: float = 10.0,
@@ -219,6 +229,9 @@ def make_loss_fn(
             print(f"[OK] Class weights computed for task={task}:")
             for i, w in enumerate(weights.tolist()):
                 print(f"  Class {i}: weight={w:.4f}")
+    loss_params = _dictify_loss_cfg(loss_cfg)
+    loss_name = loss_params.get("name", "cross_entropy")
+
     if track == "benchmark_fair":
         smoothing = 0.0 if use_weighted_sampler or sanity_mode else 0.0
         loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
@@ -233,10 +246,14 @@ def make_loss_fn(
             loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
             metadata["loss_name"] = "cross_entropy"
             return loss, metadata
-        gamma = float(focal_gamma) if focal_gamma is not None else 2.2
-        metadata["focal_gamma"] = gamma
-        loss = FocalLoss(gamma=gamma, weight=weights if use_class_weights else None)
-        metadata["loss_name"] = "focal"
+        if loss_name == "focal":
+            gamma = float(loss_params.get("focal_gamma", 2.2))
+            metadata["focal_gamma"] = gamma
+            loss = FocalLoss(gamma=gamma, weight=weights if use_class_weights else None)
+            metadata["loss_name"] = "focal"
+            return loss, metadata
+        loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=float(label_smoothing))
+        metadata["loss_name"] = loss_name
         return loss, metadata
     raise ValueError(f"Unknown track: {track}")
 
@@ -703,7 +720,6 @@ def train_one_run(cfg, args) -> None:
     use_coral = bool(args.use_coral) and task == "exp"
     loss_cfg = getattr(cfg, "loss", {})
     label_smoothing_cfg = float(getattr(loss_cfg, "label_smoothing", 0.0))
-    focal_gamma_cfg = getattr(loss_cfg, "focal_gamma", None)
     class_weight_mode_cfg = getattr(loss_cfg, "class_weight_mode", "effective_num")
     class_weight_beta_cfg = float(getattr(loss_cfg, "class_weight_beta", 0.999))
     class_weight_cap_cfg = float(getattr(loss_cfg, "class_weight_cap", 10.0))
@@ -928,7 +944,7 @@ def train_one_run(cfg, args) -> None:
         use_weighted_sampler=use_weighted_sampler,
         use_coral=use_coral,
         label_smoothing=label_smoothing_cfg,
-        focal_gamma=focal_gamma_cfg,
+        loss_cfg=loss_cfg,
         class_weight_mode=class_weight_mode_cfg,
         class_weight_beta=class_weight_beta_cfg,
         class_weight_cap=class_weight_cap_cfg,

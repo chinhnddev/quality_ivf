@@ -22,6 +22,8 @@ augmentation:
   icm_hflip_p: 0.0
 
 loss:
+  name: focal
+  focal_gamma: 2.2
   label_smoothing: 0.0
 
 swa:
