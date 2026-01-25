@@ -90,7 +90,7 @@ loss:
   class_weight_cap: 10.0
 
 # Class weighting (overridden by track config)
-use_class_weights: false
+use_class_weights: true
 
 # Metrics
 metrics:
