@@ -55,9 +55,11 @@ def _extract_monitor_from_cfg(cfg: Optional[OmegaConf], task: str) -> Optional[s
         return monitor_cfg
     container = OmegaConf.to_container(monitor_cfg, resolve=True) if OmegaConf.is_config(monitor_cfg) else monitor_cfg
     if isinstance(container, dict):
-        value = container.get(task)
-        if value:
-            return str(value)
+        if task in container and container.get(task):
+            return str(container.get(task))
+        metric_value = container.get("metric")
+        if metric_value:
+            return str(metric_value)
     return None
 
 
