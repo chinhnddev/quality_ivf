@@ -97,15 +97,12 @@ model:
 loss:
   name: coral
   label_smoothing: 0.0
-
-# Class weights (KHUYẾN NGHỊ bật cho CORAL)
-use_class_weights: true
-
-loss:
-  name: coral
   class_weight_mode: effective_num
   class_weight_beta: 0.999
   class_weight_cap: 10.0
+
+# Class weights (KHUYẾN NGHỊ bật cho CORAL)
+use_class_weights: true
 
 # ============================================================
 # Metrics
