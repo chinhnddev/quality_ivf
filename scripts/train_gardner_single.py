@@ -25,7 +25,7 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset, Subset, WeightedRandomSampler
 from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 from torchvision import transforms
 from PIL import Image
@@ -757,6 +757,7 @@ def train_one_run(cfg, args) -> None:
     # Collect train labels (after filtering) for class weights
     train_targets_full = ds_train.df["target_label"].tolist()
     train_labels = [int(y) for y in train_targets_full if y != IGNORE_INDEX]
+    valid_train_indices = [i for i, y in enumerate(train_targets_full) if y != IGNORE_INDEX]
 
     # Log class distribution
     label_counts = Counter(train_labels)
@@ -766,7 +767,7 @@ def train_one_run(cfg, args) -> None:
         count = label_counts.get(cls, 0)
         pct = 100.0 * count / max(total_train_valid, 1)
         print(f"  Class {cls}: {count} samples ({pct:.1f}%)")
-    ignored_train = len(train_targets_full) - len(train_labels)
+    ignored_train = len(train_targets_full) - total_train_valid
     print(f"  Ignored ND/NA samples (label=3): {ignored_train}")
 
     # Define flags early
@@ -812,6 +813,7 @@ def train_one_run(cfg, args) -> None:
 
     # WeightedRandomSampler setup and logging at startup
     sampler = None
+    train_dataset = ds_train
 
     if use_weighted_sampler:
         alpha = float(getattr(cfg.train, "sampler_alpha", 0.5))  # default 0.5
@@ -837,10 +839,7 @@ def train_one_run(cfg, args) -> None:
         for cls, weight in class_sampling_weights.items():
             normalized[cls] = float(weight / total_weight) if total_weight > 0 else 0.0
 
-        sample_weights = [
-            class_sampling_weights.get(int(y), 0.0) if y != IGNORE_INDEX else 0.0
-            for y in train_targets_full
-        ]
+        sample_weights = [class_sampling_weights[int(y)] for y in train_labels]
         weight_tensor = torch.tensor(sample_weights, dtype=torch.double)
         stats = {
             "min": float(weight_tensor.min()) if len(weight_tensor) else 0.0,
@@ -853,10 +852,12 @@ def train_one_run(cfg, args) -> None:
             num_samples=len(sample_weights),
             replacement=True,
         )
+        train_dataset = Subset(ds_train, valid_train_indices)
 
         print("Using WeightedRandomSampler")
         print(f"  sampler_use_sqrt_inv={sampler_use_sqrt_inv}, cap_ratio={sampler_cap_ratio}")
         print(f"  Class counts: {dict(sorted(label_counts.items()))}")
+        print(f"  Effective train samples={len(train_dataset)} (ignored={len(ds_train)-len(train_dataset)})")
         print(f"  Sampling weights stats: {stats}")
         print(f"  Per-class sampling weights (normalized): {normalized}")
         print(f"  Sample weights (first 10): {weight_tensor[:10].tolist()}")
@@ -959,7 +960,7 @@ def train_one_run(cfg, args) -> None:
     num_workers = int(cfg.data.num_workers) if "data" in cfg else 4
 
     dl_train = DataLoader(
-        ds_train,
+        train_dataset,
         batch_size=batch_size,
         sampler=sampler if use_weighted_sampler else None,
         shuffle=False if use_weighted_sampler else True,
@@ -1323,9 +1324,13 @@ def train_one_run(cfg, args) -> None:
                 collapse_dominant_class = None
                 collapse_run_len = 0
         if task in {"icm", "te"}:
-            class_range = range(4)
-            y_pred_counts_full = {cls: val_metrics["y_pred_counts"].get(cls, 0) for cls in class_range}
-            y_true_counts_full = {cls: val_metrics["y_true_counts"].get(cls, 0) for cls in class_range}
+            class_range = range(num_classes)
+            y_pred_counts_full = {
+                cls: val_metrics["y_pred_counts"].get(cls, 0) for cls in class_range
+            }
+            y_true_counts_full = {
+                cls: val_metrics["y_true_counts"].get(cls, 0) for cls in class_range
+            }
             print(f"  Val y_pred counts: {y_pred_counts_full}")
             print(f"  Val y_true counts: {y_true_counts_full}")
 
