@@ -68,14 +68,15 @@ model:
   name: ivf_effimorphpp
   dropout: 0.3
   pretrained: false          # train from scratch (paper-consistent)
-  width_mult: 1.5
+  width_mult: 1.0
   depth_mult: 1.0
-  use_xception_mid: true
+  base_channels: 32
+  use_xception_mid: false
   use_late_mhsa: false
   mhsa_layers: 1
   mhsa_heads: 4
-  use_gem: true
-  head_mlp: true
+  use_gem: false
+  head_mlp: false
   head_hidden_dim: null
   head_dropout: 0.0
 
