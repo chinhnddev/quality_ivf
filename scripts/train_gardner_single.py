@@ -119,22 +119,54 @@ def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
-def compute_class_weights(labels: List[int], num_classes: int, eps: float = 1e-8) -> torch.Tensor:
-    """Inverse-frequency normalized weights: w_c = N_total / (K * N_c)."""
+def compute_class_weights(
+    labels: List[int],
+    num_classes: int,
+    mode: str = "inverse",
+    beta: float = 0.999,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Compute per-class weights using inverse-frequency or effective number."""
     counts = np.zeros(num_classes, dtype=np.float64)
     for y in labels:
         if 0 <= y < num_classes:
             counts[y] += 1
-    total = counts.sum()
-    K = float(num_classes)
     weights = np.zeros(num_classes, dtype=np.float64)
-    for c in range(num_classes):
-        if counts[c] > 0:
-            weights[c] = total / (K * (counts[c] + eps))
-        else:
-            # missing class: weight 0, warn upstream
-            weights[c] = 0.0
+    if mode == "effective_num":
+        effective = 1.0 - np.power(beta, counts)
+        for idx, (cnt, eff) in enumerate(zip(counts, effective)):
+            if cnt > 0 and eff > eps:
+                weights[idx] = (1.0 - beta) / (eff + eps)
+            else:
+                weights[idx] = 0.0
+    else:
+        total = counts.sum()
+        K = float(num_classes)
+        for c in range(num_classes):
+            if counts[c] > 0:
+                weights[c] = total / (K * (counts[c] + eps))
+            else:
+                weights[c] = 0.0
     return torch.tensor(weights, dtype=torch.float32)
+
+
+def finalize_class_weights(weights: torch.Tensor, cap_multiplier: float = 10.0, eps: float = 1e-8) -> torch.Tensor:
+    if weights is None or weights.numel() == 0:
+        return weights
+    mean = float(weights.mean())
+    if mean > 0:
+        weights = weights / mean
+    else:
+        return weights
+    w0 = float(weights[0]) if weights.numel() > 0 else 0.0
+    max_weight = float(weights.max()) if weights.numel() > 0 else 0.0
+    cap = w0 * cap_multiplier if w0 > 0 else max_weight * cap_multiplier if max_weight > 0 else 0.0
+    if cap > 0:
+        weights = torch.clamp(weights, max=cap)
+        mean = float(weights.mean())
+        if mean > 0:
+            weights = weights / mean
+    return weights
 
 
 class FocalLoss(nn.Module):
@@ -160,7 +192,10 @@ def make_loss_fn(
     use_weighted_sampler: bool = False,
     use_coral: bool = False,
     label_smoothing: float = 0.0,
-    use_focal: bool = False,
+    focal_gamma: Optional[float] = None,
+    class_weight_mode: str = "inverse",
+    class_weight_beta: float = 0.999,
+    class_weight_cap: float = 10.0,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     metadata: Dict[str, Any] = {"loss_name": "cross_entropy"}
     if use_coral and task == "exp":
@@ -168,15 +203,15 @@ def make_loss_fn(
         return lambda logits, targets: coral_loss(logits, targets, num_classes), metadata
     weights = None
     if use_class_weights:
-        weights = compute_class_weights(train_labels, num_classes)
-        # Clip extreme weights for stability
-        clipped = torch.clamp(weights, max=10.0)
-        if not torch.equal(weights, clipped):
-            weights = clipped
-            print(f"[LOSS] Clipped class weights (max=10.0): {weights.tolist()}")
-        else:
-            print(f"[LOSS] Class weights (<=10.0): {weights.tolist()}")
-        # Warning if any missing class
+        weights = compute_class_weights(
+            train_labels,
+            num_classes,
+            mode=class_weight_mode,
+            beta=class_weight_beta,
+        )
+        weights = finalize_class_weights(weights, cap_multiplier=class_weight_cap)
+        metadata["class_weights_tensor"] = weights.clone().detach()
+        metadata["class_weights"] = weights.tolist()
         if (weights == 0).any():
             missing = [i for i, w in enumerate(weights.tolist()) if w == 0.0]
             print(f"[WARN] Missing classes in TRAIN for task={task}: {missing}. Their weight is set to 0.")
@@ -198,12 +233,10 @@ def make_loss_fn(
             loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
             metadata["loss_name"] = "cross_entropy"
             return loss, metadata
-        if use_focal:
-            loss = FocalLoss(gamma=2.0, weight=weights if use_class_weights else None)
-            metadata["loss_name"] = "focal"
-            return loss, metadata
-        loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=float(label_smoothing))
-        metadata["loss_name"] = "cross_entropy"
+        gamma = float(focal_gamma) if focal_gamma is not None else 2.2
+        metadata["focal_gamma"] = gamma
+        loss = FocalLoss(gamma=gamma, weight=weights if use_class_weights else None)
+        metadata["loss_name"] = "focal"
         return loss, metadata
     raise ValueError(f"Unknown track: {track}")
 
@@ -661,30 +694,24 @@ def train_one_run(cfg, args) -> None:
     sampling_cfg = getattr(cfg, "sampling", {})
     sampler_use_sqrt_inv = bool(sampling_cfg.get("use_sqrt_inverse", False))
     sampler_cap_ratio = float(sampling_cfg.get("cap_ratio", 5.0))
-    if task in {"icm", "te"}:
-        sampler_use_sqrt_inv = True
     if args.sampler_use_sqrt_inv is not None:
         sampler_use_sqrt_inv = bool(args.sampler_use_sqrt_inv)
     if args.sampler_cap_ratio is not None:
         sampler_cap_ratio = float(args.sampler_cap_ratio)
     if use_weighted_sampler and use_class_weights:
-        print("[WARN] WeightedRandomSampler enabled; disabling class weights to avoid double weighting.")
-        use_class_weights = False
-    use_icm_focal = bool(getattr(args, "icm_use_focal", 0))
-    if task in {"icm", "te"}:
-        if use_class_weights:
-            print("[INFO] ICM/TE tasks disable class weights by default.")
-        if use_icm_focal:
-            print("[INFO] ICM/TE tasks force focal loss OFF.")
-        use_class_weights = False
-        use_icm_focal = False
+        print("[WARN] WeightedRandomSampler and class weights both enabled; watch for double weighting.")
     use_coral = bool(args.use_coral) and task == "exp"
-    label_smoothing_cfg = float(getattr(cfg.loss, "label_smoothing", 0.0)) if hasattr(cfg, "loss") else 0.0
+    loss_cfg = getattr(cfg, "loss", {})
+    label_smoothing_cfg = float(getattr(loss_cfg, "label_smoothing", 0.0))
+    focal_gamma_cfg = getattr(loss_cfg, "focal_gamma", None)
+    class_weight_mode_cfg = getattr(loss_cfg, "class_weight_mode", "effective_num")
+    class_weight_beta_cfg = float(getattr(loss_cfg, "class_weight_beta", 0.999))
+    class_weight_cap_cfg = float(getattr(loss_cfg, "class_weight_cap", 10.0))
 
     if task == "exp":
         loss_name = "CORAL_BCEWithLogits" if use_coral else "CrossEntropyLoss"
     else:
-        loss_name = "CrossEntropyLoss"
+        loss_name = "FocalLoss" if track == "improved" else "CrossEntropyLoss"
     applied_smoothing = 0.0
     applied_smoothing = label_smoothing_cfg
     if not use_coral and task == "exp" and (use_weighted_sampler or sanity_mode):
@@ -891,12 +918,24 @@ def train_one_run(cfg, args) -> None:
     print("="*80 + "\n")
 
     # Loss
-    loss_fn, loss_meta = make_loss_fn(track=track, task=task, num_classes=num_classes,
-                           use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode,
-                           use_weighted_sampler=use_weighted_sampler, use_coral=use_coral, label_smoothing=label_smoothing_cfg,
-                           use_focal=use_icm_focal)
+    loss_fn, loss_meta = make_loss_fn(
+        track=track,
+        task=task,
+        num_classes=num_classes,
+        use_class_weights=use_class_weights,
+        train_labels=train_labels,
+        sanity_mode=sanity_mode,
+        use_weighted_sampler=use_weighted_sampler,
+        use_coral=use_coral,
+        label_smoothing=label_smoothing_cfg,
+        focal_gamma=focal_gamma_cfg,
+        class_weight_mode=class_weight_mode_cfg,
+        class_weight_beta=class_weight_beta_cfg,
+        class_weight_cap=class_weight_cap_cfg,
+    )
     if isinstance(loss_fn, nn.Module):
         loss_fn = loss_fn.to(device)
+    class_weights_tensor = loss_meta.get("class_weights_tensor")
     monitor_metric_label = getattr(cfg, "monitor_label", None)
     monitor_source = getattr(cfg, "monitor_source", "default") or "default"
     if monitor_metric_label is None:
@@ -908,9 +947,13 @@ def train_one_run(cfg, args) -> None:
     )
     if task in {"icm", "te"}:
         print(
-            f"[ICM/TE] monitor={monitor_metric_label} (key={monitor_metric_key}), "
-            f"sampler={use_weighted_sampler}, class_weights={use_class_weights}, "
-            f"loss={loss_meta.get('loss_name','cross_entropy')}"
+            f"[ICM/TE] monitor={monitor_metric_label} (key={monitor_metric_key}) "
+            f"source={monitor_source} sampler={use_weighted_sampler} "
+            f"(sqrt_inv={sampler_use_sqrt_inv}, cap_ratio={sampler_cap_ratio}) "
+            f"use_class_weights={use_class_weights} "
+            f"loss={loss_meta.get('loss_name','cross_entropy')} "
+            f"focal_gamma={loss_meta.get('focal_gamma')} "
+            f"class_weights={loss_meta.get('class_weights')}"
         )
 
     # Optimizer / scheduler
@@ -1268,9 +1311,8 @@ def train_one_run(cfg, args) -> None:
         f.write(f"y_pred distribution at best epoch: {val_metrics['y_pred_counts']}\n")
         f.write(f"Confusion matrix at best epoch: {val_metrics.get('confusion_matrix', 'N/A')}\n")
         f.write(f"Class weights applied: {use_class_weights}\n")
-        if use_class_weights:
-            weights = compute_class_weights(train_labels, num_classes)
-            f.write(f"Class weights tensor: {weights.tolist()}\n")
+        if use_class_weights and class_weights_tensor is not None:
+            f.write(f"Class weights tensor: {class_weights_tensor.tolist()}\n")
         f.write(f"WeightedRandomSampler used: {use_weighted_sampler}\n")
         f.write(f"Current LR value: {opt.param_groups[0]['lr']:.6f}\n")
         if swa_val_metrics is not None:
@@ -1321,7 +1363,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--use_class_weights", type=int, default=None)
-    parser.add_argument("--use_weighted_sampler", type=int, default=0, help="Use WeightedRandomSampler for training (0=OFF, 1=ON)")
+    parser.add_argument("--use_weighted_sampler", type=int, default=None, help="Use WeightedRandomSampler for training (0=OFF, 1=ON)")
     parser.add_argument("--use_coral", type=int, default=0, help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
     parser.add_argument("--icm_use_focal", type=int, choices=[0, 1], default=0,
                         help="Use focal loss for ICM/TE runs when track=improved (default 0).")

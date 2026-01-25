@@ -4,9 +4,11 @@ num_classes: 4
 label_col: TE
 label_valid_set: [0,1,2,3]
 masking: mask_invalid
+use_weighted_sampler: true
+use_class_weights: true
 sampling:
   use_sqrt_inverse: true
-  cap_ratio: 5.0
+  cap_ratio: 10.0
 augmentation:
   horizontal_flip: true
   vertical_flip: false
@@ -20,3 +22,5 @@ scheduler:
   warmup_lr: 0.0
 model:
   dropout: 0.1
+monitor:
+  te: val_weighted_f1

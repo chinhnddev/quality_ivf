@@ -6,7 +6,7 @@ label_valid_set: [0,1,2,3]
 masking: mask_invalid
 
 use_weighted_sampler: true
-use_class_weights: false   # bật sau nếu code có cap weight
+use_class_weights: true
 
 sampling:
   use_sqrt_inverse: true
