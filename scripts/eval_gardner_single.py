@@ -706,23 +706,36 @@ def main():
             icm_pred_list: List[int] = []
             te_gt_list: List[int] = []
             te_pred_list: List[int] = []
+            exp_skip_values = {0, 1, -1}
             for idx, r in preds_df.iterrows():
                 exp_gt = map_exp_gold_value(r["EXP"])
                 exp_pred = exp_pred_series.loc[idx] if exp_pred_series is not None else None
                 skip_exp = False
-                if filter_by_exp and exp_gt in [0, 1]:
+                if filter_by_exp and exp_gt in exp_skip_values:
                     skip_exp = True
-                if filter_by_exp and exp_pred in [0, 1]:
+                if filter_by_exp and exp_pred in exp_skip_values:
                     skip_exp = True
                 if skip_exp:
                     skipped_due_to_exp_rule += 1
                     continue
-                icm_gt_list.append(map_icm_te_gold_value(r["ICM"], merge_map=icm_merge_map))
-                te_gt_list.append(map_icm_te_gold_value(r["TE"]))
+                icm_gt_mapped = map_icm_te_gold_value(r["ICM"], merge_map=icm_merge_map)
+                te_gt_mapped = map_icm_te_gold_value(r["TE"])
                 pred_label = map_pred_icm_te(int(r["y_pred_raw"]))
+                skip_na = False
+                if task == "icm" and icm_gt_mapped == 3:
+                    skip_na = True
+                elif task == "te" and te_gt_mapped == 3:
+                    skip_na = True
+                if skip_na:
+                    removed_nd_na += 1
+                    continue
+                icm_gt_list.append(icm_gt_mapped)
+                te_gt_list.append(te_gt_mapped)
                 icm_pred_list.append(pred_label)
                 te_pred_list.append(pred_label)
-            labels = list(range(train_num_classes))
+            labels = [i for i in range(train_num_classes) if i != 3]
+            if not labels:
+                labels = list(range(train_num_classes))
             initial_total = total_matched
             if len(icm_gt_list) != len(te_gt_list):
                 print("[ICM/TE] WARNING: inconsistent ICM/TE list lengths after filtering.")
