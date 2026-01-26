@@ -25,7 +25,7 @@ data:
 train:
   epochs: 60
   batch_size: 64
-  precision: 32              # set 16 if using AMP
+  precision: 32
   gradient_clip_val: 0.0
 
 # Optimization (default; can be overridden by track config)
@@ -39,29 +39,41 @@ scheduler:
   warmup_epochs: 5
   warmup_lr: 0.000001
 
+# SWA: disable by default (can hurt macro-F1 on imbalanced ordinal-ish EXP)
 swa:
-  use: true
+  use: false
   start_epoch: 30
   lr: 0.00025
 
+# CORAL threshold tuning (only meaningful when use_coral=true in task cfg)
 coral_tuning:
   tune: true
   thr_min: 0.30
   thr_max: 0.70
   thr_step: 0.01
+
 # Augmentation (applied ONLY during training)
+# Default tuned for EXP (global-shape sensitive). Override in ICM/TE if needed.
 augmentation:
   random_resized_crop: true
-  rotation_deg: 10
+  rrc_scale: [0.95, 1.0]
+  rrc_ratio: [0.98, 1.02]
+  rotation_deg: 5
   horizontal_flip: true
-  vertical_flip: true
-  color_jitter: false        # IMPORTANT: off by default (microscope images)
+  vertical_flip: false
+  color_jitter: false        # IMPORTANT: off for microscope images
+
+# Sampling (off by default; enable in track/task if desired)
+sampling:
+  use_weighted_sampler: false
+  use_sqrt_inverse: false
+  cap_ratio: 5.0
 
 # Model (IVF-EffiMorphPP)
 model:
   name: ivf_effimorphpp
   dropout: 0.3
-  pretrained: false          # train from scratch (paper-consistent)
+  pretrained: false
   width_mult: 1.0
   depth_mult: 1.0
   use_xception_mid: false
@@ -73,13 +85,13 @@ model:
   head_hidden_dim: null
   head_dropout: 0.0
 
-# Loss defaults (overridden by track config)
+# Loss defaults (override in task cfg)
 loss:
   name: cross_entropy
   label_smoothing: 0.0
   focal_gamma: null
 
-# Class weighting (overridden by track config)
+# Class weighting defaults (override in task cfg)
 use_class_weights: false
 
 # Metrics
@@ -96,7 +108,7 @@ logging:
   log_every_n_steps: 50
   enable_progress_bar: true
 
-# Sanity checks (highly recommended)
+# Sanity checks
 sanity_checks:
   print_label_distribution: true
   assert_valid_labels: true
