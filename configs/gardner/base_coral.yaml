@@ -64,7 +64,7 @@ model:
   pretrained: false          # train from scratch (paper-consistent)
   width_mult: 1.5
   depth_mult: 1.0
-  use_xception_mid: true
+  use_xception_mid: false
   use_late_mhsa: false
   mhsa_layers: 1
   mhsa_heads: 4
@@ -86,12 +86,6 @@ use_class_weights: false
 metrics:
   primary: macro_f1
   compute_confusion_matrix: true
-
-# Validation / checkpointing
-monitor:
-  metric: val_macro_f1
-  mode: max
-  patience: 10
 
 checkpoint:
   save_best_only: true
