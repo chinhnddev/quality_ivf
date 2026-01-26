@@ -268,9 +268,14 @@ def make_loss_fn(
     loss_name = loss_params.get("name", "cross_entropy")
 
     ignore_idx = IGNORE_INDEX if task in {"icm", "te"} else None
+    def _cross_entropy_kwargs(smoothing: float) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {"weight": weights, "label_smoothing": float(smoothing)}
+        if ignore_idx is not None:
+            kwargs["ignore_index"] = ignore_idx
+        return kwargs
     if track == "benchmark_fair":
         smoothing = 0.0 if use_weighted_sampler or sanity_mode else 0.0
-        loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing, ignore_index=ignore_idx)
+        loss = nn.CrossEntropyLoss(**_cross_entropy_kwargs(smoothing))
         metadata["loss_name"] = "cross_entropy"
         return loss, metadata
     if track == "improved":
@@ -286,7 +291,7 @@ def make_loss_fn(
                 metadata["loss_name"] = "focal"
                 return loss, metadata
             smoothing = 0.0 if use_weighted_sampler or sanity_mode else float(label_smoothing)
-            loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing, ignore_index=ignore_idx)
+            loss = nn.CrossEntropyLoss(**_cross_entropy_kwargs(smoothing))
             metadata["loss_name"] = "cross_entropy"
             return loss, metadata
         if loss_name == "focal":
@@ -299,11 +304,7 @@ def make_loss_fn(
             )
             metadata["loss_name"] = "focal"
             return loss, metadata
-        loss = nn.CrossEntropyLoss(
-            weight=weights,
-            label_smoothing=float(label_smoothing),
-            ignore_index=ignore_idx,
-        )
+        loss = nn.CrossEntropyLoss(**_cross_entropy_kwargs(label_smoothing))
         metadata["loss_name"] = loss_name
         return loss, metadata
     raise ValueError(f"Unknown track: {track}")
