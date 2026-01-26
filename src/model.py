@@ -172,9 +172,6 @@ class SeparableConvBlock(nn.Module):
         assert x.shape == proj_skip.shape, f"SWA downsample mismatch {x.shape} vs {proj_skip.shape}"
         return x + proj_skip
 
-    def get_param_count(self):
-        return sum(p.numel() for p in self.parameters())
-
 
 class TransformerEncoderBlock(nn.Module):
     def __init__(self, dim, heads=4, mlp_ratio=4.0, dropout=0.0):
@@ -262,8 +259,7 @@ class IVF_EffiMorphPP(nn.Module):
         super().__init__()
 
         def make_divisible(v, d=8):
-            v = int(v + d / 2) // d * d
-            return max(d, v)
+            return int((v + d / 2) // d * d)
 
         base = make_divisible(base_channels * width_mult, divisor)
         c1 = make_divisible(2 * base, divisor)
@@ -350,9 +346,8 @@ class IVF_EffiMorphPP(nn.Module):
         s3 = self.stage3(s2)
         s4 = self.stage4(s3)
 
-        target_hw = s4.shape[-2:]
-        s2_up = F.interpolate(s2, size=target_hw, mode="bilinear", align_corners=False)
-        s3_up = F.interpolate(s3, size=target_hw, mode="bilinear", align_corners=False)
+        s2_up = F.interpolate(s2, size=(7, 7), mode="bilinear", align_corners=False)
+        s3_up = F.interpolate(s3, size=(7, 7), mode="bilinear", align_corners=False)
 
         fused = torch.cat([s2_up, s3_up, s4], dim=1)
         fused = self.fusion(fused)
@@ -360,6 +355,9 @@ class IVF_EffiMorphPP(nn.Module):
 
         if self.use_late_mhsa and self.mhsa is not None:
             x = self.mhsa(fused)
+            if self.gem is not None:
+                gem_vec = self.gem(fused).flatten(1)
+                x = x + gem_vec
         else:
             pool = self.gem(fused) if self.gem is not None else self.gap(fused)
             x = pool.flatten(1)
