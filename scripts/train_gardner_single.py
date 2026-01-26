@@ -45,21 +45,27 @@ from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_d
 IGNORE_INDEX = -100
 
 
-def _extract_monitor_from_cfg(cfg: Optional[OmegaConf], task: str) -> Optional[str]:
+def _extract_monitor_from_cfg(cfg: Optional[OmegaConf], task: str) -> Optional[Dict[str, Any]]:
     if cfg is None or not hasattr(cfg, "monitor"):
         return None
     monitor_cfg = getattr(cfg, "monitor")
     if monitor_cfg is None:
         return None
     if isinstance(monitor_cfg, str):
-        return monitor_cfg
+        return {"metric": str(monitor_cfg)}
     container = OmegaConf.to_container(monitor_cfg, resolve=True) if OmegaConf.is_config(monitor_cfg) else monitor_cfg
     if isinstance(container, dict):
+        metric_value = None
         if task in container and container.get(task):
-            return str(container.get(task))
-        metric_value = container.get("metric")
+            metric_value = container.get(task)
+        elif container.get("metric"):
+            metric_value = container.get("metric")
         if metric_value:
-            return str(metric_value)
+            return {
+                "metric": str(metric_value),
+                "mode": str(container.get("mode", "max")),
+                "patience": container.get("patience", 10),
+            }
     return None
 
 
@@ -69,19 +75,32 @@ def _monitor_key_from_label(label: str) -> str:
     return label
 
 
+def _has_monitor_improvement(current: float, best: Optional[float], mode: str) -> bool:
+    if best is None:
+        return True
+    if mode == "min":
+        return current < best
+    return current > best
+
+
 def _resolve_monitor(
     task: str, base_cfg: OmegaConf, track_cfg: OmegaConf, task_cfg: OmegaConf
-) -> Tuple[str, str]:
+) -> Tuple[str, str, int, str]:
+    default_metric = "val_acc" if task == "exp" else "val_macro_f1"
+    default_mode = "max"
+    default_patience = 10
     for cfg, source in (
         (task_cfg, "task_cfg"),
         (track_cfg, "track_cfg"),
         (base_cfg, "base_cfg"),
     ):
-        value = _extract_monitor_from_cfg(cfg, task)
-        if value:
-            return value, source
-    default = "val_acc" if task == "exp" else "val_macro_f1"
-    return default, "default"
+        monitor_cfg = _extract_monitor_from_cfg(cfg, task)
+        if monitor_cfg:
+            label = monitor_cfg.get("metric", default_metric)
+            mode = str(monitor_cfg.get("mode", default_mode))
+            patience = monitor_cfg.get("patience", default_patience)
+            return label, mode, int(patience), source
+    return default_metric, default_mode, default_patience, "default"
 
 
 # =========================
@@ -1026,13 +1045,20 @@ def train_one_run(cfg, args) -> None:
         loss_fn = loss_fn.to(device)
     class_weights_tensor = loss_meta.get("class_weights_tensor")
     monitor_metric_label = getattr(cfg, "monitor_label", None)
+    monitor_mode = getattr(cfg, "monitor_mode", "max") or "max"
+    monitor_patience = getattr(cfg, "monitor_patience", 10) or 10
     monitor_source = getattr(cfg, "monitor_source", "default") or "default"
     if monitor_metric_label is None:
         monitor_metric_label = "val_macro_f1" if task in {"icm", "te"} else "val_acc"
     monitor_metric_key = _monitor_key_from_label(monitor_metric_label)
+    monitor_mode = str(monitor_mode).lower()
+    if monitor_mode not in {"min", "max"}:
+        monitor_mode = "max"
+    monitor_patience = max(0, int(monitor_patience))
     print(
         f"[MONITOR] task={task} resolved monitor={monitor_metric_label} "
-        f"key={monitor_metric_key} source={monitor_source}"
+        f"key={monitor_metric_key} mode={monitor_mode} patience={monitor_patience} "
+        f"source={monitor_source}"
     )
     if task in {"icm", "te"}:
         print(
@@ -1087,10 +1113,11 @@ def train_one_run(cfg, args) -> None:
     if task == "exp" and use_coral:
         print(f"CORAL tuning: enabled={tune_coral_thr} grid=[{thr_min},{thr_max}] step={thr_step}")
 
-    best_metric = -1.0
+    best_metric: Optional[float] = None
     best_epoch = 0
     best_path = out_dir / "best.ckpt"
     metrics_val_path = out_dir / "metrics_val.json"
+    epochs_without_improvement = 0
 
     # Sanity overfit test (optional)
     if args.sanity_overfit:
@@ -1337,9 +1364,11 @@ def train_one_run(cfg, args) -> None:
             print(f"  Val y_true counts: {y_true_counts_full}")
 
         # save best
-        if monitor > best_metric:
+        improved = _has_monitor_improvement(monitor, best_metric, monitor_mode)
+        if improved:
             best_metric = monitor
             best_epoch = epoch
+            epochs_without_improvement = 0
             ckpt_payload = {
                 "state_dict": model.state_dict(),
                 "task": task,
@@ -1355,6 +1384,14 @@ def train_one_run(cfg, args) -> None:
                 f"  [BEST] Saved best to {best_path} "
                 f"(monitor={monitor_metric_label}={best_metric:.4f})"
             )
+        else:
+            epochs_without_improvement += 1
+            if monitor_patience > 0 and epochs_without_improvement >= monitor_patience:
+                print(
+                    f"[EARLY STOP] No improvement on {monitor_metric_label} "
+                    f"for {epochs_without_improvement} epochs (patience={monitor_patience})."
+                )
+                break
         if use_swa and epoch >= swa_start_epoch:
             swa_model.update_parameters(model)
             swa_scheduler.step()
@@ -1406,6 +1443,8 @@ def train_one_run(cfg, args) -> None:
             f"Best monitor {monitor_metric_label} "
             f"({monitor_metric_key}) = {best_metric:.4f}\n"
         )
+        f.write(f"Monitor mode/patience: {monitor_mode}/{monitor_patience}\n")
+        f.write(f"Epochs without improvement at stop: {epochs_without_improvement}\n")
         f.write(f"y_pred distribution at best epoch: {val_metrics['y_pred_counts']}\n")
         f.write(f"Confusion matrix at best epoch: {val_metrics.get('confusion_matrix', 'N/A')}\n")
         f.write(f"Class weights applied: {use_class_weights}\n")
@@ -1544,10 +1583,19 @@ def main():
     if args.use_weighted_sampler is not None:
         cfg.use_weighted_sampler = bool(args.use_weighted_sampler)
     monitor_label = args.monitor_metric
+    monitor_mode = None
+    monitor_patience = None
     monitor_source = "cli" if monitor_label else None
     if monitor_label is None:
-        monitor_label, monitor_source = _resolve_monitor(cfg.task, cfg_base, cfg_track, cfg_task)
+        monitor_label, monitor_mode, monitor_patience, monitor_source = _resolve_monitor(
+            cfg.task, cfg_base, cfg_track, cfg_task
+        )
+    else:
+        monitor_mode = "max"
+        monitor_patience = 10
     cfg.monitor_label = monitor_label
+    cfg.monitor_mode = monitor_mode
+    cfg.monitor_patience = monitor_patience
     cfg.monitor_source = monitor_source or "default"
     cfg.train_icmte_exclude_na_nd = bool(getattr(cfg, "train_icmte_exclude_na_nd", False))
     if args.train_icmte_exclude_na_nd is not None:

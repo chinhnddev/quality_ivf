@@ -24,8 +24,8 @@ data:
 # Training
 train:
   epochs: 60
-  batch_size: 32
-  precision: 16              # set 16 if using AMP
+  batch_size: 64
+  precision: 32              # set 16 if using AMP
   gradient_clip_val: 0.0
 
 # Optimization (default; can be overridden by track config)
@@ -40,8 +40,8 @@ scheduler:
   warmup_lr: 0.000001
 
 sampling:
-  use_sqrt_inverse: true
-  cap_ratio: 6.0
+  use_sqrt_inverse: false
+  cap_ratio: 5.0
 
 swa:
   use: true
@@ -66,36 +66,36 @@ augmentation:
 # Model (IVF-EffiMorphPP)
 model:
   name: ivf_effimorphpp
-  dropout: 0.4
+  dropout: 0.3
   pretrained: false          # train from scratch (paper-consistent)
   width_mult: 1.5
   depth_mult: 1.0
-  base_channels: 32
   use_xception_mid: false
   use_late_mhsa: false
   mhsa_layers: 1
   mhsa_heads: 4
   use_gem: true
   head_mlp: true
-  head_hidden_dim: 512
-  head_dropout: 0.3
+  head_hidden_dim: null
+  head_dropout: 0.0
 
 # Loss defaults (overridden by track config)
 loss:
   name: cross_entropy
-  label_smoothing: 0
+  label_smoothing: 0.0
   focal_gamma: null
   class_weight_mode: effective_num
   class_weight_beta: 0.999
   class_weight_cap: 10.0
 
 # Class weighting (overridden by track config)
-use_class_weights: true
+use_class_weights: false
 
 # Metrics
 metrics:
   primary: macro_f1
   compute_confusion_matrix: true
+
 
 checkpoint:
   save_best_only: true
