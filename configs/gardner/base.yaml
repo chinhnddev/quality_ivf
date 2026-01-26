@@ -71,7 +71,7 @@ model:
   width_mult: 1.5
   depth_mult: 1.0
   base_channels: 32
-  use_xception_mid: true
+  use_xception_mid: false
   use_late_mhsa: false
   mhsa_layers: 1
   mhsa_heads: 4
@@ -83,7 +83,7 @@ model:
 # Loss defaults (overridden by track config)
 loss:
   name: cross_entropy
-  label_smoothing: 0.1
+  label_smoothing: 0
   focal_gamma: null
   class_weight_mode: effective_num
   class_weight_beta: 0.999
