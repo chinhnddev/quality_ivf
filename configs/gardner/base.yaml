@@ -44,7 +44,7 @@ sampling:
   cap_ratio: 5.0
 
 swa:
-  use: true
+  use: false
   start_epoch: 30
   lr: 0.00025
 
@@ -56,13 +56,11 @@ coral_tuning:
 # Augmentation (applied ONLY during training)
 augmentation:
   random_resized_crop: true
-  rotation_deg: 10
+  rrc_scale: [0.95, 1.0]
+  rrc_ratio: [0.98, 1.02]
+  rotation_deg: 5
   horizontal_flip: true
-  vertical_flip: true
-  color_jitter: false        # IMPORTANT: off by default (microscope images)
-  rrc_scale: [0.8, 1.0]
-  rrc_ratio: [0.9, 1.1]
-
+  vertical_flip: false
 # Model (IVF-EffiMorphPP)
 model:
   name: ivf_effimorphpp
@@ -82,14 +80,12 @@ model:
 # Loss defaults (overridden by track config)
 loss:
   name: cross_entropy
-  label_smoothing: 0.0
-  focal_gamma: null
   class_weight_mode: effective_num
   class_weight_beta: 0.999
   class_weight_cap: 10.0
 
 # Class weighting (overridden by track config)
-use_class_weights: false
+use_class_weights: true
 
 # Metrics
 metrics:
