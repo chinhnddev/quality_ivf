@@ -4,9 +4,7 @@
 import argparse
 import json
 import math
-import os
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -18,7 +16,6 @@ from collections import Counter, defaultdict
 from omegaconf import OmegaConf
 from sklearn.metrics import (
     accuracy_score,
-    classification_report,
     confusion_matrix,
     f1_score,
     precision_recall_fscore_support,
@@ -278,11 +275,18 @@ def make_loss_fn(
         return loss, metadata
     if track == "improved":
         if task == "exp":
-            if use_weighted_sampler or sanity_mode:
-                smoothing = 0.0
-            else:
-                smoothing = float(label_smoothing)
-            loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
+            if loss_name == "focal":
+                gamma = float(loss_params.get("focal_gamma", 2.2))
+                metadata["focal_gamma"] = gamma
+                loss = FocalLoss(
+                    gamma=gamma,
+                    weight=weights if use_class_weights else None,
+                    ignore_index=ignore_idx,
+                )
+                metadata["loss_name"] = "focal"
+                return loss, metadata
+            smoothing = 0.0 if use_weighted_sampler or sanity_mode else float(label_smoothing)
+            loss = nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing, ignore_index=ignore_idx)
             metadata["loss_name"] = "cross_entropy"
             return loss, metadata
         if loss_name == "focal":
@@ -415,7 +419,6 @@ class GardnerDataset(Dataset):
             "icm_rotation_deg": 10,
             "icm_hflip_p": 0.0,
             # Keep paper-style key for backward compatibility; not used to gate ICM/TE anymore
-            "random_resized_crop": False,
             # Keep erasing off unless explicitly enabled in config
             "erasing_p": 0.0,
         }
@@ -455,6 +458,7 @@ class GardnerDataset(Dataset):
         if (not is_icm_te) and (not transform_cfg.get("random_resized_crop", True)):
             use_rrc = False
 
+        target_size = int(self.image_size)
         norm = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
         if self.split == "train" and not sanity_mode:
@@ -462,10 +466,12 @@ class GardnerDataset(Dataset):
 
             # Geometric (PIL)
             if use_rrc:
-                pipeline.append(transforms.RandomResizedCrop(224, scale=rrc_scale, ratio=rrc_ratio))
+                pipeline.append(
+                    transforms.RandomResizedCrop(target_size, scale=rrc_scale, ratio=rrc_ratio)
+                )
             else:
-                pipeline.append(transforms.Resize(224))
-                pipeline.append(transforms.CenterCrop(224))
+                pipeline.append(transforms.Resize(target_size))
+                pipeline.append(transforms.CenterCrop(target_size))
 
             # Photometric jitter (PIL) - must be before ToTensor
             if is_icm_te:
@@ -504,8 +510,8 @@ class GardnerDataset(Dataset):
 
         deterministic = transforms.Compose(
             [
-                transforms.Resize(224),
-                transforms.CenterCrop(224),
+                transforms.Resize(target_size),
+                transforms.CenterCrop(target_size),
                 transforms.ToTensor(),
                 norm,
             ]
@@ -545,6 +551,7 @@ def evaluate_on_val(
     epoch: int,
     use_coral: bool = False,
     num_classes: int = 0,
+    compute_confusion_matrix: bool = False,
 ) -> Dict:
     model.eval()
     ys, ps = [], []
@@ -601,6 +608,16 @@ def evaluate_on_val(
     y_true_counts = Counter(ys)
     y_true_ratios = {cls: float(count / total_preds) for cls, count in y_true_counts.items()}
 
+    cm = None
+    cm_labels: List[int] = []
+    if compute_confusion_matrix and labels:
+        cm_labels = labels
+        try:
+            cm = confusion_matrix(ys, ps, labels=labels)
+        except ValueError:
+            cm = confusion_matrix(ys, ps)
+            cm_labels = sorted(set(ys) | set(ps))
+
     if task in {"icm", "te"}:
         unique_labels = sorted(set(ys))
         if epoch == 1:
@@ -629,6 +646,8 @@ def evaluate_on_val(
         "y_pred_ratios": dict(sorted(y_pred_ratios.items())),
         "y_true_counts": dict(sorted(y_true_counts.items())),
         "y_true_ratios": dict(sorted(y_true_ratios.items())),
+        "confusion_matrix": cm.tolist() if cm is not None else None,
+        "confusion_matrix_labels": cm_labels if cm is not None else [],
     }
 
 
@@ -686,6 +705,8 @@ def train_one_run(cfg, args) -> None:
     splits_dir = Path(cfg.splits_dir)
     out_dir = Path(cfg.out_dir) / track / task
     ensure_dir(out_dir)
+    metrics_cfg = getattr(cfg, "metrics", {})
+    compute_confusion_matrix = bool(getattr(metrics_cfg, "compute_confusion_matrix", False))
 
     # Save resolved config
     OmegaConf.save(cfg, out_dir / "config.yaml")
@@ -1304,7 +1325,16 @@ def train_one_run(cfg, args) -> None:
             print(f"  Train y_pred counts: {dict(sorted(train_pred_counts.items()))}")
 
         # val
-        val_metrics = evaluate_on_val(model, dl_val, device, task, epoch, use_coral, num_classes)
+        val_metrics = evaluate_on_val(
+            model,
+            dl_val,
+            device,
+            task,
+            epoch,
+            use_coral,
+            num_classes,
+            compute_confusion_matrix=compute_confusion_matrix,
+        )
         monitor = val_metrics[monitor_metric_key]
         print(
             f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f} | "
@@ -1314,13 +1344,37 @@ def train_one_run(cfg, args) -> None:
             f"val_avg_rec={val_metrics['avg_recall_weighted']:.4f} "
             f"val_avg_f1={val_metrics['avg_f1_weighted']:.4f}"
         )
+        per_class_recall = val_metrics.get("per_class_recall", [])
+        per_class_support = val_metrics.get("per_class_support", [])
+        if per_class_recall:
+            labels_for_metrics = list(range(len(per_class_recall)))
+            recall_summary = ", ".join(
+                f"{label}:{rec:.3f}(sup={per_class_support[idx] if idx < len(per_class_support) else 0})"
+                for idx, (label, rec) in enumerate(zip(labels_for_metrics, per_class_recall))
+            )
+            print(f"  Val per-class recall: {recall_summary}")
+            if task not in {"icm", "te"}:
+                y_pred_counts_full = {
+                    cls: val_metrics["y_pred_counts"].get(cls, 0) for cls in labels_for_metrics
+                }
+                y_true_counts_full = {
+                    cls: val_metrics["y_true_counts"].get(cls, 0) for cls in labels_for_metrics
+                }
+                print(f"  Val y_pred counts: {y_pred_counts_full}")
+                print(f"  Val y_true counts: {y_true_counts_full}")
+        if compute_confusion_matrix:
+            cm = val_metrics.get("confusion_matrix")
+            cm_labels = val_metrics.get("confusion_matrix_labels", [])
+            if cm is not None:
+                label_order = cm_labels if cm_labels else list(range(len(cm)))
+                print(f"  Val confusion matrix (labels={label_order}):")
+                for lbl, row in zip(label_order, cm):
+                    print(f"    {lbl}: {row}")
         if task == "icm":
-            per_class_recall = val_metrics.get("per_class_recall", [])
-            if per_class_recall:
-                recall_summary = ", ".join(f"{cls}:{rec:.3f}" for cls, rec in enumerate(per_class_recall))
-                print(f"  Val per-class recall: {recall_summary}")
+            per_class_recall_icm = val_metrics.get("per_class_recall", [])
+            if per_class_recall_icm:
                 per_class_support = val_metrics.get("per_class_support", [])
-                for cls_idx, rec in enumerate(per_class_recall):
+                for cls_idx, rec in enumerate(per_class_recall_icm):
                     support = per_class_support[cls_idx] if cls_idx < len(per_class_support) else 0
                     skip_zero = cls_idx == 2 and support < 5
                     if rec == 0 and not skip_zero:
@@ -1415,7 +1469,14 @@ def train_one_run(cfg, args) -> None:
         }, swa_ckpt_path)
         print(f"[SWA] Saved averaged checkpoint to {swa_ckpt_path}")
         swa_val_metrics = evaluate_on_val(
-            swa_model, dl_val, device, task, epoch, use_coral, num_classes
+            swa_model,
+            dl_val,
+            device,
+            task,
+            epoch,
+            use_coral,
+            num_classes,
+            compute_confusion_matrix=compute_confusion_matrix,
         )
         print(f"[SWA VAL] acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}")
 
