@@ -84,7 +84,7 @@ model:
   use_gem: true
   use_late_mhsa: false
 
-  head_mlp: true
+  head_mlp: false
   head_hidden_dim: null
   head_dropout: 0.0
 
