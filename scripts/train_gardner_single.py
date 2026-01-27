@@ -41,6 +41,8 @@ from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_d
 
 IGNORE_INDEX = -100
 
+DEFAULT_CORAL_THRESHOLDS = [0.5, 0.5, 0.5, 0.1]
+
 
 def _extract_monitor_from_cfg(cfg: Optional[OmegaConf], task: str) -> Optional[Dict[str, Any]]:
     if cfg is None or not hasattr(cfg, "monitor"):
@@ -553,6 +555,7 @@ def evaluate_on_val(
     use_coral: bool = False,
     num_classes: int = 0,
     compute_confusion_matrix: bool = False,
+    coral_thresholds: Optional[List[float]] = None,
 ) -> Dict:
     model.eval()
     ys, ps = [], []
@@ -564,7 +567,8 @@ def evaluate_on_val(
         x = x.to(device)
         logits = model(x)
         if use_coral:
-            preds = coral_predict_class(logits).cpu()
+            thresholds_to_use = coral_thresholds or DEFAULT_CORAL_THRESHOLDS
+            preds = coral_predict_class(logits, thresholds=thresholds_to_use).cpu()
         else:
             preds = logits.argmax(dim=1).cpu()
         y = y.cpu()
@@ -1225,6 +1229,7 @@ def train_one_run(cfg, args) -> None:
     best_epoch = 0
     best_path = out_dir / "best.ckpt"
     metrics_val_path = out_dir / "metrics_val.json"
+    current_coral_thresholds = list(DEFAULT_CORAL_THRESHOLDS)
     epochs_without_improvement = 0
 
     # Sanity overfit test (optional)
@@ -1421,6 +1426,7 @@ def train_one_run(cfg, args) -> None:
             use_coral,
             num_classes,
             compute_confusion_matrix=compute_confusion_matrix,
+            coral_thresholds=current_coral_thresholds if use_coral else None,
         )
         monitor = val_metrics[monitor_metric_key]
         print(
@@ -1431,6 +1437,8 @@ def train_one_run(cfg, args) -> None:
             f"val_avg_rec={val_metrics['avg_recall_weighted']:.4f} "
             f"val_avg_f1={val_metrics['avg_f1_weighted']:.4f}"
         )
+        if use_coral:
+            print(f"  CORAL thresholds in use: {current_coral_thresholds}")
         per_class_recall = val_metrics.get("per_class_recall", [])
         per_class_support = val_metrics.get("per_class_support", [])
         if per_class_recall:
@@ -1564,6 +1572,7 @@ def train_one_run(cfg, args) -> None:
             use_coral,
             num_classes,
             compute_confusion_matrix=compute_confusion_matrix,
+            coral_thresholds=current_coral_thresholds if use_coral else None,
         )
         print(f"[SWA VAL] acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}")
 
@@ -1571,17 +1580,21 @@ def train_one_run(cfg, args) -> None:
     if task == "exp" and use_coral and tune_coral_thr:
         threshold_result = tune_coral_threshold(eval_model, dl_val, device, thr_min, thr_max, thr_step)
         if threshold_result:
+            current_coral_thresholds = threshold_result["best_thr"]
             threshold_payload = {
                 "best_coral_thr": threshold_result["best_thr"],
+                "best_thr_last": threshold_result.get("best_thr_last"),
                 "metric": {
-                    "val_f1_weighted": threshold_result["best_f1"],
-                    "val_acc": threshold_result["best_acc"],
+                    "val_f1_macro": threshold_result.get("best_f1_macro"),
+                    "val_f1_weighted": threshold_result.get("best_f1_weighted"),
+                    "val_acc": threshold_result.get("best_acc"),
                 },
                 "grid": threshold_result["grid"],
             }
             with open(threshold_json_path, "w", encoding="utf-8") as f:
                 json.dump(threshold_payload, f, indent=2)
             print(f"[CORAL TUNING] Saved tuned threshold to {threshold_json_path}")
+            print(f"[CORAL TUNING] Using new thresholds: {current_coral_thresholds}")
 
     # Write debug report
     debug_report_path = out_dir / "debug_report.txt"
