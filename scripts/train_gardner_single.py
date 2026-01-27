@@ -670,33 +670,119 @@ def collect_coral_logits(model: nn.Module, loader: DataLoader, device: torch.dev
     return torch.cat(logits_acc, dim=0), torch.cat(label_acc, dim=0)
 
 
-def tune_coral_threshold(model: nn.Module, loader: DataLoader, device: torch.device, thr_min: float, thr_max: float, thr_step: float) -> Optional[Dict]:
+def tune_coral_threshold(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    thr_min: float,
+    thr_max: float,
+    thr_step: float,
+    num_classes: int = 5,
+    base_thr: float = 0.5,
+) -> Optional[Dict]:
+    """
+    Tune CORAL thresholds for EXP (ordinal 0..4) in a robust way.
+
+    Strategy:
+      - Keep thresholds for first K-2 ranks fixed at base_thr
+      - Tune ONLY the last threshold (k=K-2), which controls emergence of top class (class 4)
+      - Select best by macro-F1 (not weighted-F1) to avoid collapsing minority classes
+
+    Returns:
+      dict with best thresholds vector and grid results
+    """
     logits, labels = collect_coral_logits(model, loader, device)
     if logits.numel() == 0:
         print("[CORAL TUNING] No validation logits collected; skipping threshold search.")
         return None
+
     thr_min = float(thr_min)
     thr_max = float(thr_max)
     thr_step = float(thr_step)
     if thr_step <= 0 or thr_min > thr_max:
         print("[CORAL TUNING] Invalid threshold search range; skipping.")
         return None
+
+    # CORAL logits dim must be K-1
+    k_minus_1 = logits.shape[1]
+    if k_minus_1 != (num_classes - 1):
+        print(f"[CORAL TUNING] Unexpected logits dim={k_minus_1}, expected {num_classes-1}; skipping.")
+        return None
+
     thr_values = np.arange(thr_min, thr_max + 1e-8, thr_step)
+    y_true = labels.detach().cpu().numpy()
+
     best = None
     grid = []
-    y_true = labels.numpy()
-    for thr in thr_values:
-        preds = coral_predict_class(logits, thresholds=float(thr)).cpu().numpy()
-        f1 = f1_score(y_true, preds, average="weighted", zero_division=0, labels=list(range(5)))
+
+    # thresholds vector: [t0, t1, ..., t_{K-2}]
+    # We tune only last one t_{K-2}
+    fixed = [float(base_thr)] * (num_classes - 2)
+
+    for thr_last in thr_values:
+        thr_vec = fixed + [float(thr_last)]
+
+        preds = coral_predict_class(logits, thresholds=thr_vec).detach().cpu().numpy()
+
+        f1_macro = f1_score(
+            y_true,
+            preds,
+            average="macro",
+            zero_division=0,
+            labels=list(range(num_classes)),
+        )
+        f1_weighted = f1_score(
+            y_true,
+            preds,
+            average="weighted",
+            zero_division=0,
+            labels=list(range(num_classes)),
+        )
         acc = accuracy_score(y_true, preds)
-        grid.append({"threshold": round(float(thr), 4), "val_f1_weighted": float(f1), "val_acc": float(acc)})
-        if best is None or f1 > best["f1"] or (
-            abs(f1 - best["f1"]) < 1e-8 and acc > best["acc"]
+
+        pred_counts = np.bincount(preds, minlength=num_classes)
+        has_top_class = int(pred_counts[num_classes - 1] > 0)
+
+        grid.append(
+            {
+                "thresholds": [round(x, 4) for x in thr_vec],
+                "thr_last": round(float(thr_last), 4),
+                "val_f1_macro": float(f1_macro),
+                "val_f1_weighted": float(f1_weighted),
+                "val_acc": float(acc),
+                "pred_top_class_nonzero": has_top_class,
+                "pred_counts": pred_counts.tolist(),
+            }
+        )
+
+        if best is None or f1_macro > best["f1_macro"] or (
+            abs(f1_macro - best["f1_macro"]) < 1e-8 and acc > best["acc"]
         ):
-            best = {"thr": float(thr), "f1": float(f1), "acc": float(acc)}
+            best = {
+                "thresholds": thr_vec,
+                "thr_last": float(thr_last),
+                "f1_macro": float(f1_macro),
+                "f1_weighted": float(f1_weighted),
+                "acc": float(acc),
+                "pred_counts": pred_counts.tolist(),
+            }
+
     if best is not None:
-        print(f"[CORAL TUNING] Best uniform threshold={best['thr']:.4f} | val_f1_weighted={best['f1']:.4f} | val_acc={best['acc']:.4f}")
-        return {"best_thr": best["thr"], "best_f1": best["f1"], "best_acc": best["acc"], "grid": grid}
+        t_str = ",".join([f"{t:.3f}" for t in best["thresholds"]])
+        print(
+            f"[CORAL TUNING] Best thresholds=[{t_str}] | "
+            f"val_f1_macro={best['f1_macro']:.4f} | val_acc={best['acc']:.4f} | "
+            f"pred_counts={best['pred_counts']}"
+        )
+        return {
+            "best_thr": best["thresholds"],
+            "best_thr_last": best["thr_last"],
+            "best_f1_macro": best["f1_macro"],
+            "best_f1_weighted": best["f1_weighted"],
+            "best_acc": best["acc"],
+            "grid": grid,
+        }
+
     return None
 
 

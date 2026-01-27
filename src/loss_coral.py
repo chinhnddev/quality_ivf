@@ -60,17 +60,6 @@ def coral_loss(logits: torch.Tensor, y: torch.Tensor, num_classes: int, reductio
 
 
 def coral_predict_class(logits: torch.Tensor, thresholds = 0.5) -> torch.Tensor:
-    """
-    Decode CORAL logits to class predictions with per-threshold support.
-
-    Args:
-        logits: (B, K-1) CORAL logits for K-1 thresholds
-        thresholds: scalar (float) applied to all K-1 logits, or list of K-1 thresholds
-                   (default: 0.5)
-
-    Returns:
-        y_pred: (B,) predicted class labels in [0, K-1]
-    """
     # Convert logits to probabilities
     probs = torch.sigmoid(logits)  # (B, K-1)
 
