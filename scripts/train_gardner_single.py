@@ -41,6 +41,8 @@ from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_d
 
 IGNORE_INDEX = -100
 
+DEFAULT_CORAL_THRESHOLDS = [0.55, 0.55, 0.55, 0.55]
+
 DEFAULT_CORAL_THRESHOLDS = [0.5, 0.5, 0.5, 0.6]
 
 
@@ -556,27 +558,42 @@ def evaluate_on_val(
     num_classes: int = 0,
     compute_confusion_matrix: bool = False,
     coral_thresholds: Optional[List[float]] = None,
+    precomputed_logits: Optional[torch.Tensor] = None,
+    precomputed_labels: Optional[torch.Tensor] = None,
 ) -> Dict:
     model.eval()
     ys, ps = [], []
-    for batch in loader:
-        if len(batch) == 4:
-            x, y, _, _ = batch
-        else:
-            x, y, _ = batch
-        x = x.to(device)
-        logits = model(x)
+    thresholds_to_use = coral_thresholds or DEFAULT_CORAL_THRESHOLDS
+    if precomputed_logits is not None and precomputed_labels is not None:
+        logits_tensor = precomputed_logits.to(device)
+        label_tensor = precomputed_labels.to(device)
         if use_coral:
-            thresholds_to_use = DEFAULT_CORAL_THRESHOLDS if coral_thresholds is None else coral_thresholds
-            preds = coral_predict_class(logits, thresholds=thresholds_to_use).cpu()
+            preds = coral_predict_class(logits_tensor, thresholds=thresholds_to_use).cpu()
         else:
-            preds = logits.argmax(dim=1).cpu()
-        y = y.cpu()
+            preds = logits_tensor.argmax(dim=1).cpu()
+        y = label_tensor.cpu()
         mask = y != IGNORE_INDEX
-        if not mask.any():
-            continue
-        ys.extend(y[mask].tolist())
-        ps.extend(preds[mask].tolist())
+        if mask.any():
+            ys.extend(y[mask].tolist())
+            ps.extend(preds[mask].tolist())
+    else:
+        for batch in loader:
+            if len(batch) == 4:
+                x, y, _, _ = batch
+            else:
+                x, y, _ = batch
+            x = x.to(device)
+            logits = model(x)
+            if use_coral:
+                preds = coral_predict_class(logits, thresholds=thresholds_to_use).cpu()
+            else:
+                preds = logits.argmax(dim=1).cpu()
+            y = y.cpu()
+            mask = y != IGNORE_INDEX
+            if not mask.any():
+                continue
+            ys.extend(y[mask].tolist())
+            ps.extend(preds[mask].tolist())
     if not ys:
         empty_metrics = {
             "acc": 0.0,
@@ -683,6 +700,8 @@ def tune_coral_threshold(
     thr_step: float,
     num_classes: int = 5,
     base_thr: float = 0.5,
+    logits: Optional[torch.Tensor] = None,
+    labels: Optional[torch.Tensor] = None,
 ) -> Optional[Dict]:
     """
     Tune CORAL thresholds for EXP (ordinal 0..4) in a robust way.
@@ -695,7 +714,8 @@ def tune_coral_threshold(
     Returns:
       dict with best thresholds vector and grid results
     """
-    logits, labels = collect_coral_logits(model, loader, device)
+    if logits is None or labels is None:
+        logits, labels = collect_coral_logits(model, loader, device)
     if logits.numel() == 0:
         print("[CORAL TUNING] No validation logits collected; skipping threshold search.")
         return None
@@ -1417,6 +1437,24 @@ def train_one_run(cfg, args) -> None:
             print(f"  Train y_pred counts: {dict(sorted(train_pred_counts.items()))}")
 
         # val
+        precomputed_logits = None
+        precomputed_labels = None
+        if use_coral and tune_coral_thr:
+            precomputed_logits, precomputed_labels = collect_coral_logits(model, dl_val, device)
+            epoch_tune = tune_coral_threshold(
+                model,
+                dl_val,
+                device,
+                thr_min,
+                thr_max,
+                thr_step,
+                num_classes=num_classes,
+                logits=precomputed_logits,
+                labels=precomputed_labels,
+            )
+            if epoch_tune is not None:
+                current_coral_thresholds = epoch_tune["best_thr"]
+
         val_metrics = evaluate_on_val(
             model,
             dl_val,
@@ -1427,6 +1465,8 @@ def train_one_run(cfg, args) -> None:
             num_classes,
             compute_confusion_matrix=compute_confusion_matrix,
             coral_thresholds=current_coral_thresholds if use_coral else None,
+            precomputed_logits=precomputed_logits,
+            precomputed_labels=precomputed_labels,
         )
         monitor = val_metrics[monitor_metric_key]
         print(
