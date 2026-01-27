@@ -52,8 +52,8 @@ coral_tuning:
 # Augmentation (applied ONLY during training)
 augmentation:
   random_resized_crop: true
-  rrc_scale: [0.95, 1.0]
-  rrc_ratio: [0.98, 1.02]
+  rrc_scale: [0.8, 1.0]
+  rrc_ratio: [0.9, 1.1]
   rotation_deg: 5
   horizontal_flip: true
   vertical_flip: true
@@ -90,7 +90,7 @@ metrics:
 
 # Validation / checkpointing
 monitor:
-  metric: val_macro_f1
+  metric: val_weighted_f1
   mode: max
   patience: 10
 
