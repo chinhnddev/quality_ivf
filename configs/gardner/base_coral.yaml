@@ -48,8 +48,8 @@ swa:
 # CORAL threshold tuning (only meaningful when use_coral=true in task cfg)
 coral_tuning:
   tune: true
-  thr_min: 0.30
-  thr_max: 0.70
+  thr_min: 0.05
+  thr_max: 0.50
   thr_step: 0.01
 
 # Augmentation (applied ONLY during training)
