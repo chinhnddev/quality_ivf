@@ -41,7 +41,7 @@ from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_d
 
 IGNORE_INDEX = -100
 
-DEFAULT_CORAL_THRESHOLDS = [0.5, 0.5, 0.5, 0.1]
+DEFAULT_CORAL_THRESHOLDS = [0.5, 0.5, 0.5, 0.6]
 
 
 def _extract_monitor_from_cfg(cfg: Optional[OmegaConf], task: str) -> Optional[Dict[str, Any]]:
@@ -567,7 +567,7 @@ def evaluate_on_val(
         x = x.to(device)
         logits = model(x)
         if use_coral:
-            thresholds_to_use = coral_thresholds or DEFAULT_CORAL_THRESHOLDS
+            thresholds_to_use = DEFAULT_CORAL_THRESHOLDS if coral_thresholds is None else coral_thresholds
             preds = coral_predict_class(logits, thresholds=thresholds_to_use).cpu()
         else:
             preds = logits.argmax(dim=1).cpu()
