@@ -8,3 +8,4 @@ masking: none
 monitor:
   metric: val_macro_f1
   mode: max
+  patience = 0

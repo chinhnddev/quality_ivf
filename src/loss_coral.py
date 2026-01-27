@@ -21,14 +21,14 @@ def coral_encode_targets(y: torch.Tensor, num_classes: int) -> torch.Tensor:
         targets: (B, K-1) binary tensor where targets[b,k] = 1 if y[b] > k else 0
     """
     assert num_classes >= 2, "num_classes must be >= 2"
-    device = y.device
-    targets = torch.zeros(y.shape[0], num_classes - 1, device=device, dtype=torch.float32)
 
-    for k in range(num_classes - 1):
-        targets[:, k] = (y > k).float()
+    # k: (1, K-1)
+    k = torch.arange(num_classes - 1, device=y.device).unsqueeze(0)
+
+    # y: (B,) -> (B, 1), targets: (B, K-1)
+    targets = (y.unsqueeze(1) > k).float()
 
     return targets
-
 
 def coral_loss(logits: torch.Tensor, y: torch.Tensor, num_classes: int, reduction: str = "mean") -> torch.Tensor:
     """
@@ -77,7 +77,7 @@ def coral_predict_class(logits: torch.Tensor, thresholds = 0.5) -> torch.Tensor:
     # Handle thresholds: scalar or list
     if isinstance(thresholds, (int, float)):
         # Scalar: broadcast to all K-1 thresholds
-        exceeds = (probs > thresholds).float()
+        exceeds = (probs >= thresholds).float()
     else:
         # List/tensor of thresholds
         thresholds_tensor = torch.as_tensor(thresholds, device=logits.device, dtype=logits.dtype)
@@ -93,6 +93,8 @@ def coral_predict_class(logits: torch.Tensor, thresholds = 0.5) -> torch.Tensor:
     # Count how many thresholds are exceeded
     # y_pred = sum over k where prob_k > threshold_k
     y_pred = exceeds.sum(dim=1).long()
+    y_pred = y_pred.clamp(min=0, max=logits.shape[1])
+
 
     return y_pred
 
