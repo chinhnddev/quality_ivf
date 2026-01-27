@@ -41,9 +41,7 @@ from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_d
 
 IGNORE_INDEX = -100
 
-DEFAULT_CORAL_THRESHOLDS = [0.55, 0.55, 0.55, 0.55]
-
-DEFAULT_CORAL_THRESHOLDS = [0.5, 0.5, 0.5, 0.6]
+DEFAULT_CORAL_THRESHOLDS = [0.5, 0.5, 0.5, 0.15]
 
 
 def _extract_monitor_from_cfg(cfg: Optional[OmegaConf], task: str) -> Optional[Dict[str, Any]]:
@@ -1656,12 +1654,8 @@ def train_one_run(cfg, args) -> None:
         if swa_val_metrics is not None:
             f.write(f"SWA val metrics: acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}\n")
         if threshold_result is not None:
-            best_thr_str = ",".join(f"{t:.4f}" for t in threshold_result["best_thr"])
-            f.write(f"Best tuned coral thresholds: [{best_thr_str}]\n")
-            f.write(
-                f"Threshold f1_macro/acc: "
-                f"{threshold_result['best_f1_macro']:.4f}/{threshold_result['best_acc']:.4f}\n"
-            )
+            f.write(f"Best tuned coral threshold: {threshold_result['best_thr']:.4f}\n")
+            f.write(f"Threshold f1/acc: {threshold_result['best_f1']:.4f}/{threshold_result['best_acc']:.4f}\n")
 
         # Check for majority-class collapse
         max_ratio = max(val_metrics['y_pred_ratios'].values())

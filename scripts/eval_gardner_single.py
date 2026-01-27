@@ -6,7 +6,7 @@ import json
 import random
 from pathlib import Path
 from collections import Counter
-from typing import List, Tuple, Optional, Dict, Iterable
+from typing import List, Tuple, Optional, Dict, Iterable, Union
 
 # Add project root to sys.path
 ROOT = Path(__file__).resolve().parents[1]
@@ -376,7 +376,9 @@ def extract_predicted_exp_series(preds_df: pd.DataFrame) -> Optional[pd.Series]:
 DEFAULT_CORAL_THR = 0.5
 
 
-def find_automatic_coral_threshold(checkpoint: Path, out_dir: Path) -> Optional[float]:
+def find_automatic_coral_threshold(
+    checkpoint: Path, out_dir: Path
+) -> Optional[Union[float, List[float]]]:
     candidates = []
     if checkpoint:
         candidates.append(checkpoint.parent)
@@ -396,6 +398,9 @@ def find_automatic_coral_threshold(checkpoint: Path, out_dir: Path) -> Optional[
             thr_value = payload.get("best_coral_thr")
             if thr_value is None:
                 continue
+            if isinstance(thr_value, list):
+                print(f"[AUTO CORAL] Loaded tuned thresholds {thr_value} from {thr_path}")
+                return thr_value
             thr_value = float(thr_value)
             print(f"[AUTO CORAL] Loaded tuned threshold {thr_value:.4f} from {thr_path}")
             return thr_value
@@ -489,10 +494,14 @@ def main():
     user_provided_thr = args.coral_thr is not None
     coral_thr_value = args.coral_thr if user_provided_thr else DEFAULT_CORAL_THR
     auto_thr_enabled = bool(args.auto_thr)
+    auto_coral_thresholds: Optional[List[float]] = None
     if use_coral_flag and args.task == "exp" and auto_thr_enabled and not user_provided_thr:
         auto_thr = find_automatic_coral_threshold(Path(args.checkpoint), Path(args.out_dir))
         if auto_thr is not None:
-            coral_thr_value = auto_thr
+            if isinstance(auto_thr, list):
+                auto_coral_thresholds = auto_thr
+            else:
+                coral_thr_value = auto_thr
         else:
             print(f"[AUTO CORAL] No tuned threshold found; falling back to default {coral_thr_value:.2f}")
 
@@ -527,7 +536,10 @@ def main():
             dummy = torch.randn(1, 3, 224, 224).to(device)
             out = model(dummy)
             assert out.shape[1] == 4, f"Expected 4 CORAL logits, got {out.shape[1]}"
-        if args.coral_thr_last is not None:
+        if auto_coral_thresholds is not None:
+            coral_thresholds = auto_coral_thresholds
+            print(f"[CORAL] Using auto tuned thresholds: {coral_thresholds}")
+        elif args.coral_thr_last is not None:
             coral_thresholds = [coral_thr_value, coral_thr_value, coral_thr_value, args.coral_thr_last]
             print(f"[CORAL] Using per-threshold decoding: {coral_thresholds}")
         else:
