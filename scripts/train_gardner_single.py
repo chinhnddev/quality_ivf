@@ -1658,7 +1658,10 @@ def train_one_run(cfg, args) -> None:
         if threshold_result is not None:
             best_thr_str = ",".join(f"{t:.4f}" for t in threshold_result["best_thr"])
             f.write(f"Best tuned coral thresholds: [{best_thr_str}]\n")
-            f.write(f"Threshold f1/acc: {threshold_result['best_f1']:.4f}/{threshold_result['best_acc']:.4f}\n")
+            f.write(
+                f"Threshold f1_macro/acc: "
+                f"{threshold_result['best_f1_macro']:.4f}/{threshold_result['best_acc']:.4f}\n"
+            )
 
         # Check for majority-class collapse
         max_ratio = max(val_metrics['y_pred_ratios'].values())
