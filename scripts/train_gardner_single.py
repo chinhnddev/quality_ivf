@@ -236,7 +236,13 @@ class GardnerDataset(Dataset):
                 except Exception:
                     aug_cfg.update({k: aug[k] for k in aug})
 
-        base_defaults = {"rotation_deg": 10, "horizontal_flip": True, "vertical_flip": True}
+        base_defaults = {
+            "rotation_deg": 10,
+            "horizontal_flip": True,
+            "vertical_flip": True,
+            "rrc_scale": [0.8, 1.0],
+            "rrc_ratio": [0.9, 1.1],
+        }
         task_overrides = {}
         if self.task in {"icm", "te"}:
             task_overrides = {"rotation_deg": 5, "horizontal_flip": True, "vertical_flip": False}
@@ -248,12 +254,15 @@ class GardnerDataset(Dataset):
         rotation_deg = float(transform_cfg.get("rotation_deg", 0))
         horizontal_flip = _bool("horizontal_flip", True)
         vertical_flip = _bool("vertical_flip", True)
+        target_size = int(self.image_size)
+        rrc_scale = tuple(transform_cfg.get("rrc_scale", base_defaults["rrc_scale"]))
+        rrc_ratio = tuple(transform_cfg.get("rrc_ratio", base_defaults["rrc_ratio"]))
 
         norm = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
         if self.split == "train" and not sanity_mode:
             pipeline = [
-                transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
+                transforms.RandomResizedCrop(target_size, scale=rrc_scale, ratio=rrc_ratio),
             ]
             if horizontal_flip:
                 pipeline.append(transforms.RandomHorizontalFlip(p=0.5))
@@ -271,8 +280,8 @@ class GardnerDataset(Dataset):
 
         # val/test/sanity: deterministic
         deterministic = transforms.Compose([
-            transforms.Resize(224),
-            transforms.CenterCrop(224),
+            transforms.Resize(target_size),
+            transforms.CenterCrop(target_size),
             transforms.ToTensor(),
             norm,
         ])

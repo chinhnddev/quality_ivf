@@ -52,7 +52,9 @@ coral_tuning:
 # Augmentation (applied ONLY during training)
 augmentation:
   random_resized_crop: true
-  rotation_deg: 10
+  rrc_scale: [0.95, 1.0]
+  rrc_ratio: [0.98, 1.02]
+  rotation_deg: 5
   horizontal_flip: true
   vertical_flip: true
 
@@ -61,7 +63,7 @@ model:
   name: ivf_effimorphpp
   dropout: 0.3
   pretrained: false          # train from scratch (paper-consistent)
-  width_mult: 1.0
+  width_mult: 1.2
   depth_mult: 1.0
   use_xception_mid: true
   use_late_mhsa: false
