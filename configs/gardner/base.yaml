@@ -68,7 +68,7 @@ model:
   pretrained: false          # train from scratch (paper-consistent)
   width_mult: 1.2
   depth_mult: 1.0
-  use_xception_mid: false
+  use_xception_mid: true
   use_late_mhsa: false
   mhsa_layers: 1
   mhsa_heads: 4
