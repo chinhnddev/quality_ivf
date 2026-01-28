@@ -182,7 +182,7 @@ class IVF_EffiMorphPP(nn.Module):
         )
 
         self.stage2 = DWConvBlock(c1, c2, stride=2)
-        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=2)
+        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=1)
         self.stage4 = DWConvBlock(c3, c4, stride=2)
 
         # Fusion
@@ -218,9 +218,8 @@ class IVF_EffiMorphPP(nn.Module):
         s3 = self.stage3(s2)
         s4 = self.stage4(s3)
 
-        target_size = s4.shape[2:]  # Lấy spatial size từ s4
-        s2_up = F.interpolate(s2, size=target_size, mode="bilinear", align_corners=False)
-        s3_up = F.interpolate(s3, size=target_size, mode="bilinear", align_corners=False)
+        s2_up = F.interpolate(s2, size=(7, 7), mode="bilinear", align_corners=False)
+        s3_up = F.interpolate(s3, size=(7, 7), mode="bilinear", align_corners=False)
 
         fused = torch.cat([s2_up, s3_up, s4], dim=1)
         fused = self.fusion(fused)
