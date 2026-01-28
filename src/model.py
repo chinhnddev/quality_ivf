@@ -291,7 +291,7 @@ class IVF_EffiMorphPP(nn.Module):
         p2 = self.fpn_s2(p2 + p3_up)
 
         # Use the finest pyramid level (P2) as fused representation
-        fused = self.eca(p2)
+        fused = self.eca(p3)
 
         x = self.gap(fused).flatten(1)
         x = self.dropout(x)
