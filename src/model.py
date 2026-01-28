@@ -124,7 +124,7 @@ class DWConvBlock(nn.Module):
     Depthwise Separable Convolution với residual connection
     Hỗ trợ stride=1/2, dilation>=1
     """
-    def __init__(self, in_channels: int, out_channels: int, stride: int = 1, dilation: int = 1):
+    def __init__(self, in_channels, out_channels, stride=1, dilation=1):
         super().__init__()
 
         self.dw = nn.Sequential(
@@ -150,22 +150,18 @@ class DWConvBlock(nn.Module):
 
         self.simam = SimAM(out_channels)
 
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, 1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels),
-            )
-        else:
-            self.shortcut = None
+        self.use_res = stride == 1 and in_channels == out_channels
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = self.shortcut(x) if self.shortcut is not None else x
+    def forward(self, x):
+        identity = x
 
         x = self.dw(x)
         x = self.pw(x)
         x = self.simam(x)
 
-        return x + identity
+        if self.use_res:
+            x = x + identity
+        return x
 
 
 # -------------------------
