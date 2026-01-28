@@ -1,38 +1,62 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 
 # -------------------------
 # Attention blocks
 # -------------------------
 class SimAM(nn.Module):
-    def __init__(self, channels):
+    """
+    Simple Attention Module
+    Paper: https://arxiv.org/abs/2106.03105
+    """
+    def __init__(self, channels: int):
         super().__init__()
         self.activation = nn.Sigmoid()
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.size()
         n = h * w - 1
         mu = x.mean(dim=[2, 3], keepdim=True)
         var = (x - mu).pow(2)
-        y = var / (4 * (var.sum(dim=[2, 3], keepdim=True) / n + 1e-8)) + 0.5
+        # epsilon 1e-6 để tránh numerical instability
+        y = var / (4 * (var.sum(dim=[2, 3], keepdim=True) / n + 1e-6)) + 0.5
         return x * self.activation(y)
 
 
 class ECA(nn.Module):
-    def __init__(self, channels, k_size=5):
+    """
+    Efficient Channel Attention
+    Paper: https://arxiv.org/abs/1910.03151
+    """
+    def __init__(self, channels: int, k_size: int | None = None):
         super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        if k_size is None:
+            k_size = self._get_adaptive_kernel_size(channels)
+
         self.conv = nn.Conv1d(
             1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False
         )
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x):
+    @staticmethod
+    def _get_adaptive_kernel_size(channels: int, gamma: int = 2, b: int = 1) -> int:
+        """
+        Adaptive kernel size theo ECA paper
+        k = |log2(C) / γ + b / γ|_odd
+        """
+        t = int(abs((math.log2(channels) / gamma) + (b / gamma)))
+        k = t if t % 2 else t + 1  # đảm bảo lẻ
+        return max(3, k)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, 1, c)
-        y = self.conv(y).view(b, c, 1, 1)
+        y = self.avg_pool(x).view(b, 1, c)   # B,1,C
+        y = self.conv(y).view(b, c, 1, 1)   # B,C,1,1
         return x * self.sigmoid(y)
 
 
@@ -40,7 +64,10 @@ class ECA(nn.Module):
 # Multi-scale block
 # -------------------------
 class MultiScaleBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    """
+    Multi-scale convolution block với 3 branches (3x3, 5x5, 7x7)
+    """
+    def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         c = out_channels // 3
 
@@ -70,14 +97,15 @@ class MultiScaleBlock(nn.Module):
 
         self.use_res = in_channels == out_channels
         if not self.use_res:
-            self.skip = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+            self.skip = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 1, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
 
-        x = torch.cat(
-            [self.branch1(x), self.branch2(x), self.branch3(x)], dim=1
-        )
+        x = torch.cat([self.branch1(x), self.branch2(x), self.branch3(x)], dim=1)
         x = self.proj(x)
         x = self.simam(x)
 
@@ -92,14 +120,18 @@ class MultiScaleBlock(nn.Module):
 # Depthwise block with residual
 # -------------------------
 class DWConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1, dilation=1):
+    """
+    Depthwise Separable Convolution với residual connection
+    Hỗ trợ stride=1/2, dilation>=1
+    """
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1, dilation: int = 1):
         super().__init__()
 
         self.dw = nn.Sequential(
             nn.Conv2d(
                 in_channels,
                 in_channels,
-                3,
+                kernel_size=3,
                 stride=stride,
                 padding=dilation,
                 dilation=dilation,
@@ -118,18 +150,22 @@ class DWConvBlock(nn.Module):
 
         self.simam = SimAM(out_channels)
 
-        self.use_res = stride == 1 and in_channels == out_channels
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
+        else:
+            self.shortcut = None
 
-    def forward(self, x):
-        identity = x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = self.shortcut(x) if self.shortcut is not None else x
 
         x = self.dw(x)
         x = self.pw(x)
         x = self.simam(x)
 
-        if self.use_res:
-            x = x + identity
-        return x
+        return x + identity
 
 
 # -------------------------
@@ -137,11 +173,11 @@ class DWConvBlock(nn.Module):
 # -------------------------
 class IVF_EffiMorphPP(nn.Module):
     """
-    Stable IVF_EffiMorphPP
-    - BN + Residual
-    - Concat fusion
-    - LayerNorm head (batch-size safe)
-    - Supports CORAL ordinal regression for EXP task
+    IVF_EffiMorphPP (clean)
+    - Dynamic interpolation size (no hardcode 7x7)
+    - Residual projection for all DWConvBlocks
+    - Adaptive ECA kernel size
+    - CORAL optional (EXP -> K-1 logits)
     """
 
     def __init__(
@@ -151,13 +187,15 @@ class IVF_EffiMorphPP(nn.Module):
         width_mult: float = 1.0,
         base_channels: int = 32,
         divisor: int = 8,
-        eca_k: int = 5,
         task: str = "exp",
         use_coral: bool = False,
+        stage3_dilation: int = 1,  # <-- đổi 1->2 nếu bạn muốn giữ dilation=2
     ):
         super().__init__()
+        self.task = task
+        self.use_coral = use_coral
 
-        def make_divisible(v, d=8):
+        def make_divisible(v: float, d: int = 8) -> int:
             return int((v + d / 2) // d * d)
 
         base = make_divisible(base_channels * width_mult, divisor)
@@ -166,40 +204,44 @@ class IVF_EffiMorphPP(nn.Module):
         c3 = make_divisible(8 * base, divisor)
         c4 = make_divisible(16 * base, divisor)
 
-        # Stem
+        # Stem: /2
         self.stem = nn.Sequential(
             nn.Conv2d(3, base, 3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(base),
             nn.ReLU(inplace=True),
         )
 
-        # Stages
+        # Stage 1 (no downsample)
         self.stage1 = MultiScaleBlock(base, c1)
+
+        # /2
         self.stage1_down = nn.Sequential(
             nn.Conv2d(c1, c1, 3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(c1),
             nn.ReLU(inplace=True),
         )
 
-        self.stage2 = DWConvBlock(c1, c2, stride=2)
-        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=1)
-        self.stage4 = DWConvBlock(c3, c4, stride=2)
+        # /2
+        self.stage2 = DWConvBlock(c1, c2, stride=2, dilation=1)
 
-        # Fusion
+        # /2  (dilation configurable)
+        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=stage3_dilation)
+
+        # /2
+        self.stage4 = DWConvBlock(c3, c4, stride=2, dilation=1)
+
+        # Fusion: concat(s2,s3,s4)->c4
         self.fusion = nn.Sequential(
             nn.Conv2d(c2 + c3 + c4, c4, 1, bias=False),
             nn.BatchNorm2d(c4),
             nn.ReLU(inplace=True),
         )
-        self.eca = ECA(c4, eca_k)
+        self.eca = ECA(c4, k_size=None)
 
-        # Head
         hidden = max(128, c4 // 2)
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout(dropout_p)
 
-        # For CORAL ordinal regression on EXP task, output K-1 logits instead of K
-        # CORAL uses K-1 thresholds for K classes (0 to K-1)
         output_dim = num_classes - 1 if (task == "exp" and use_coral) else num_classes
         self.head = nn.Sequential(
             nn.Linear(c4, hidden),
@@ -209,7 +251,7 @@ class IVF_EffiMorphPP(nn.Module):
             nn.Linear(hidden, output_dim),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
         x = self.stage1(x)
         x = self.stage1_down(x)
@@ -218,8 +260,9 @@ class IVF_EffiMorphPP(nn.Module):
         s3 = self.stage3(s2)
         s4 = self.stage4(s3)
 
-        s2_up = F.interpolate(s2, size=(7, 7), mode="bilinear", align_corners=False)
-        s3_up = F.interpolate(s3, size=(7, 7), mode="bilinear", align_corners=False)
+        target_size = s4.shape[2:]
+        s2_up = F.interpolate(s2, size=target_size, mode="bilinear", align_corners=False)
+        s3_up = F.interpolate(s3, size=target_size, mode="bilinear", align_corners=False)
 
         fused = torch.cat([s2_up, s3_up, s4], dim=1)
         fused = self.fusion(fused)
@@ -227,16 +270,4 @@ class IVF_EffiMorphPP(nn.Module):
 
         x = self.gap(fused).flatten(1)
         x = self.dropout(x)
-        x = self.head(x)
-        return x
-
-
-# -------------------------
-# Quick sanity check
-# -------------------------
-if __name__ == "__main__":
-    model = IVF_EffiMorphPP(num_classes=5)
-    x = torch.randn(2, 3, 224, 224)
-    y = model(x)
-    print("Output:", y.shape)
-    print("Params:", sum(p.numel() for p in model.parameters()) // 1_000_000, "M")
+        return self.head(x)
