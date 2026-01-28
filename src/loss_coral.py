@@ -6,6 +6,7 @@ Used for EXP task ordinal classification (0,1,2,3,4).
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Union, List, Optional
 
 
 def coral_encode_targets(y: torch.Tensor, num_classes: int) -> torch.Tensor:
@@ -59,63 +60,127 @@ def coral_loss(logits: torch.Tensor, y: torch.Tensor, num_classes: int, reductio
         raise ValueError(f"Unknown reduction: {reduction}")
 
 
-def coral_predict_class(logits: torch.Tensor, thresholds = 0.5) -> torch.Tensor:
+def coral_predict_class(
+    logits: torch.Tensor,
+    thresholds: Union[float, List[float]] = 0.5
+) -> torch.Tensor:
     """
-    Decode CORAL logits to class predictions with per-threshold support.
+    Convert CORAL logits to class predictions.
 
     Args:
-        logits: (B, K-1) CORAL logits for K-1 thresholds
-        thresholds: scalar (float) applied to all K-1 logits, or list of K-1 thresholds
-                   (default: 0.5)
+        logits: Tensor of shape (B, K-1) containing raw logits for K-1 cumulative thresholds
+        thresholds: Either a single threshold or a list of K-1 thresholds
 
     Returns:
-        y_pred: (B,) predicted class labels in [0, K-1]
+        Tensor of shape (B,) containing predicted class indices (0 to K-1)
     """
-    # Convert logits to probabilities
     probs = torch.sigmoid(logits)  # (B, K-1)
 
-    # Handle thresholds: scalar or list
     if isinstance(thresholds, (int, float)):
-        # Scalar: broadcast to all K-1 thresholds
-        exceeds = (probs > thresholds).float()
+        # Uniform threshold
+        preds = (probs > thresholds).sum(dim=1)  # Count how many thresholds exceeded
     else:
-        # List/tensor of thresholds
-        thresholds_tensor = torch.as_tensor(thresholds, device=logits.device, dtype=logits.dtype)
-        if thresholds_tensor.dim() == 0:
-            # Scalar tensor -> broadcast
-            exceeds = (probs > thresholds_tensor).float()
-        else:
-            # 1D tensor of length K-1
-            assert thresholds_tensor.shape[0] == logits.shape[1], \
-                f"thresholds length ({thresholds_tensor.shape[0]}) must match logits dim 1 ({logits.shape[1]})"
-            exceeds = (probs > thresholds_tensor.unsqueeze(0)).float()
+        # Per-threshold values
+        thresholds_tensor = torch.tensor(thresholds, device=logits.device, dtype=logits.dtype)
+        preds = (probs > thresholds_tensor.unsqueeze(0)).sum(dim=1)
 
-    # Count how many thresholds are exceeded
-    # y_pred = sum over k where prob_k > threshold_k
-    y_pred = exceeds.sum(dim=1).long()
-
-    return y_pred
+    return preds.long()
 
 
-def coral_loss_masked(logits: torch.Tensor, y: torch.Tensor, num_classes: int, ignore_index: int = -1) -> torch.Tensor:
+class CoralLoss(nn.Module):
     """
-    CORAL loss with masking for ignored labels (optional helper).
+    CORAL (Consistent Rank Logits) loss for ordinal regression.
 
-    Args:
-        logits: (B, K-1) CORAL logits
-        y: (B,) class labels, with ignore_index for masked positions
-        num_classes: K
-        ignore_index: value to ignore
+    Paper: "Rank consistent ordinal regression for neural networks with application to age estimation"
+    https://arxiv.org/abs/1901.07884
 
-    Returns:
-        loss: scalar tensor (mean over valid positions)
+    For K classes (0, 1, ..., K-1), the model outputs K-1 logits.
+    Each logit l_k represents P(Y > k | X) for k = 0, 1, ..., K-2
     """
-    valid_mask = (y != ignore_index)
 
-    if valid_mask.sum() == 0:
-        return torch.tensor(0.0, device=logits.device)
+    def __init__(self, num_classes: int, weight: Optional[torch.Tensor] = None):
+        """
+        Args:
+            num_classes: Number of ordinal classes K
+            weight: Optional class weights of shape (K,) for weighted loss
+        """
+        super().__init__()
+        self.num_classes = num_classes
+        self.num_thresholds = num_classes - 1
+        self.register_buffer('weight', weight)
 
-    logits_valid = logits[valid_mask]
-    y_valid = y[valid_mask]
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            logits: Predictions of shape (B, K-1)
+            targets: Ground truth labels of shape (B,) with values in {0, 1, ..., K-1}
 
-    return coral_loss(logits_valid, y_valid, num_classes, reduction="mean")
+        Returns:
+            Scalar loss value
+        """
+        batch_size = logits.size(0)
+
+        # Create binary labels for each threshold
+        # For target y and threshold k: label is 1 if y > k, else 0
+        # Shape: (B, K-1)
+        levels = torch.arange(self.num_thresholds, device=logits.device).unsqueeze(0)
+        binary_targets = (targets.unsqueeze(1) > levels).float()
+
+        # Binary cross entropy for each threshold
+        loss = F.binary_cross_entropy_with_logits(
+            logits, binary_targets, reduction='none'
+        )  # (B, K-1)
+
+        # Apply class weights if provided
+        if self.weight is not None:
+            # Weight by the target class
+            sample_weights = self.weight[targets]  # (B,)
+            loss = loss * sample_weights.unsqueeze(1)
+
+        return loss.mean()
+
+
+class CoralLossWithImportance(nn.Module):
+    """
+    CORAL loss with importance weighting for different thresholds.
+    Allows giving more weight to certain ordinal boundaries.
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        threshold_weights: Optional[List[float]] = None,
+        class_weights: Optional[torch.Tensor] = None
+    ):
+        super().__init__()
+        self.num_classes = num_classes
+        self.num_thresholds = num_classes - 1
+
+        if threshold_weights is None:
+            threshold_weights = [1.0] * self.num_thresholds
+
+        self.register_buffer(
+            'threshold_weights',
+            torch.tensor(threshold_weights, dtype=torch.float32)
+        )
+        self.register_buffer('class_weights', class_weights)
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        batch_size = logits.size(0)
+
+        levels = torch.arange(self.num_thresholds, device=logits.device).unsqueeze(0)
+        binary_targets = (targets.unsqueeze(1) > levels).float()
+
+        loss = F.binary_cross_entropy_with_logits(
+            logits, binary_targets, reduction='none'
+        )  # (B, K-1)
+
+        # Apply threshold importance weights
+        loss = loss * self.threshold_weights.unsqueeze(0)
+
+        # Apply class weights if provided
+        if self.class_weights is not None:
+            sample_weights = self.class_weights[targets]
+            loss = loss * sample_weights.unsqueeze(1)
+
+        return loss.mean()
