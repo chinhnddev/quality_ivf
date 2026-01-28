@@ -225,12 +225,33 @@ class IVF_EffiMorphPP(nn.Module):
         # /2
         self.stage4 = DWConvBlock(c3, c4, stride=2, dilation=1)
 
-        # Fusion: concat(s2,s3,s4)->c4
-        self.fusion = nn.Sequential(
-            nn.Conv2d(c2 + c3 + c4, c4, 1, bias=False),
+        # --- FPN-lite fusion (2-step top-down) ---
+        # Lateral 1x1 to align channels
+        self.lat_s2 = nn.Sequential(
+            nn.Conv2d(c2, c4, 1, bias=False),
+            nn.BatchNorm2d(c4),
+        )
+        self.lat_s3 = nn.Sequential(
+            nn.Conv2d(c3, c4, 1, bias=False),
+            nn.BatchNorm2d(c4),
+        )
+        self.lat_s4 = nn.Sequential(
+            nn.Identity()  # s4 already has c4 channels
+        )
+
+        # Smooth conv after top-down addition (optional but standard FPN)
+        self.fpn_s3 = nn.Sequential(
+            nn.Conv2d(c4, c4, 3, padding=1, bias=False),
             nn.BatchNorm2d(c4),
             nn.ReLU(inplace=True),
         )
+        self.fpn_s2 = nn.Sequential(
+            nn.Conv2d(c4, c4, 3, padding=1, bias=False),
+            nn.BatchNorm2d(c4),
+            nn.ReLU(inplace=True),
+        )
+
+        # Keep your existing channel attention on the final fused feature
         self.eca = ECA(c4, k_size=None)
 
         hidden = max(128, c4 // 2)
@@ -255,13 +276,22 @@ class IVF_EffiMorphPP(nn.Module):
         s3 = self.stage3(s2)
         s4 = self.stage4(s3)
 
-        target_size = s4.shape[2:]
-        s2_up = F.interpolate(s2, size=target_size, mode="bilinear", align_corners=False)
-        s3_up = F.interpolate(s3, size=target_size, mode="bilinear", align_corners=False)
+        # --- FPN-lite fusion (2-step top-down) ---
+        # Lateral projections
+        p4 = self.lat_s4(s4)              # B x c4 x H/32 x W/32
+        p3 = self.lat_s3(s3)              # B x c4 x H/16 x W/16
+        p2 = self.lat_s2(s2)              # B x c4 x H/8  x W/8
 
-        fused = torch.cat([s2_up, s3_up, s4], dim=1)
-        fused = self.fusion(fused)
-        fused = self.eca(fused)
+        # Top-down: P4 -> P3
+        p4_up = F.interpolate(p4, size=p3.shape[2:], mode="bilinear", align_corners=False)
+        p3 = self.fpn_s3(p3 + p4_up)
+
+        # Top-down: P3 -> P2
+        p3_up = F.interpolate(p3, size=p2.shape[2:], mode="bilinear", align_corners=False)
+        p2 = self.fpn_s2(p2 + p3_up)
+
+        # Use the finest pyramid level (P2) as fused representation
+        fused = self.eca(p2)
 
         x = self.gap(fused).flatten(1)
         x = self.dropout(x)

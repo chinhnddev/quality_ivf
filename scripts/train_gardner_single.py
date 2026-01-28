@@ -253,7 +253,7 @@ class GardnerDataset(Dataset):
 # =========================
 
 @torch.no_grad()
-def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, use_coral: bool = False) -> Dict:
+def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, use_coral: bool = False, verbose: bool = False, task: str = "exp") -> Dict:
     model.eval()
     ys, ps = [], []
     for batch in loader:
@@ -277,10 +277,59 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
     # Per-class metrics
     precision, recall, f1, support = precision_recall_fscore_support(ys, ps, average=None, zero_division=0)
 
-    # y_pred distribution
+    # y_pred and y_true distribution
     from collections import Counter
     y_pred_counts = Counter(ps)
-    y_pred_ratios = {cls: count / len(ps) for cls, count in y_pred_counts.items()}
+    y_true_counts = Counter(ys)
+    total = len(ps) if ps else 1
+    y_pred_ratios = {cls: count / total for cls, count in y_pred_counts.items()}
+    y_true_ratios = {cls: count / total for cls, count in y_true_counts.items()}
+
+    # Determine label space based on task
+    if task == "exp":
+        labels = list(range(5))  # 0-4 for EXP
+    else:
+        labels = list(range(3))  # 0-2 for ICM/TE (valid classes only during training)
+
+    # Compute confusion matrix
+    cm = confusion_matrix(ys, ps, labels=labels)
+
+    # Verbose logging
+    if verbose and len(ys) > 0:
+        print(f"\n  [EVAL DISTRIBUTION] task={task}")
+        print(f"  Total samples: {total}")
+        
+        # y_true distribution
+        print(f"  y_true class counts: ", end="")
+        for cls in labels:
+            count = y_true_counts.get(cls, 0)
+            ratio = count / total
+            print(f"{cls}:{count}({ratio:.1%}) ", end="")
+        print()
+        
+        # y_pred distribution
+        print(f"  y_pred class counts: ", end="")
+        for cls in labels:
+            count = y_pred_counts.get(cls, 0)
+            ratio = count / total
+            print(f"{cls}:{count}({ratio:.1%}) ", end="")
+        print()
+        
+        # Confusion matrix
+        print(f"  Confusion Matrix (rows=true, cols=pred):")
+        # Header
+        header = "      " + "".join([f"{c:>6}" for c in labels])
+        print(header)
+        for i, row in enumerate(cm):
+            row_str = f"  {labels[i]:>3}: " + "".join([f"{v:>6}" for v in row])
+            print(row_str)
+        
+        # Per-class recall
+        print(f"  Per-class recall: ", end="")
+        for cls in labels:
+            if support is not None and cls < len(recall):
+                print(f"{cls}:{recall[cls]:.3f} ", end="")
+        print()
 
     return {
         "acc": float(acc),
@@ -291,7 +340,10 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
         "per_class_f1": f1.tolist() if f1 is not None else [],
         "per_class_support": support.tolist() if support is not None else [],
         "y_pred_counts": dict(sorted(y_pred_counts.items())),
-        "y_pred_ratios": dict(sorted(y_pred_ratios.items()))
+        "y_pred_ratios": dict(sorted(y_pred_ratios.items())),
+        "y_true_counts": dict(sorted(y_true_counts.items())),
+        "y_true_ratios": dict(sorted(y_true_ratios.items())),
+        "confusion_matrix": cm.tolist(),
     }
 
 
@@ -777,7 +829,7 @@ def train_one_run(cfg, args) -> None:
         train_loss = running / max(n, 1)
 
         # val
-        val_metrics = evaluate_on_val(model, dl_val, device, use_coral)
+        val_metrics = evaluate_on_val(model, dl_val, device, use_coral, verbose=(epoch == epochs or epoch % 10 == 0), task=task)
         monitor_metric = cfg.monitor.metric if hasattr(cfg, 'monitor') and hasattr(cfg.monitor, 'metric') else "macro_f1"
         monitor = val_metrics[monitor_metric]  # align with cfg.monitor.metric if you prefer parsing it
         print(f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f} | "
@@ -816,7 +868,7 @@ def train_one_run(cfg, args) -> None:
             "swa": True
         }, swa_ckpt_path)
         print(f"[SWA] Saved averaged checkpoint to {swa_ckpt_path}")
-        swa_val_metrics = evaluate_on_val(swa_model, dl_val, device, use_coral)
+        swa_val_metrics = evaluate_on_val(swa_model, dl_val, device, use_coral, verbose=True, task=task)
         print(f"[SWA VAL] acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}")
 
     threshold_result = None
@@ -841,7 +893,8 @@ def train_one_run(cfg, args) -> None:
         f.write(f"Best epoch: {best_metric}\n")
         f.write(f"Best val_macro_f1: {best_metric:.4f}\n")
         f.write(f"y_pred distribution at best epoch: {val_metrics['y_pred_counts']}\n")
-        f.write(f"Confusion matrix at best epoch: {val_metrics.get('confusion_matrix', 'N/A')}\n")
+        f.write(f"y_true distribution at best epoch: {val_metrics.get('y_true_counts', 'N/A')}\n")
+        f.write(f"Confusion matrix at best epoch:\n{np.array(val_metrics.get('confusion_matrix', []))}\n")
         f.write(f"Class weights applied: {use_class_weights}\n")
         if use_class_weights:
             weights = compute_class_weights(train_labels, num_classes)
@@ -850,12 +903,13 @@ def train_one_run(cfg, args) -> None:
         f.write(f"Current LR value: {opt.param_groups[0]['lr']:.6f}\n")
         if swa_val_metrics is not None:
             f.write(f"SWA val metrics: acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}\n")
+            f.write(f"SWA confusion matrix:\n{np.array(swa_val_metrics.get('confusion_matrix', []))}\n")
         if threshold_result is not None:
             f.write(f"Best tuned coral threshold: {threshold_result['best_thr']:.4f}\n")
             f.write(f"Threshold f1/acc: {threshold_result['best_f1']:.4f}/{threshold_result['best_acc']:.4f}\n")
 
         # Check for majority-class collapse
-        max_ratio = max(val_metrics['y_pred_ratios'].values())
+        max_ratio = max(val_metrics['y_pred_ratios'].values()) if val_metrics['y_pred_ratios'] else 0
         if max_ratio > 0.8:
             f.write("Likely majority-class collapse due to imbalance. Recommend enabling WeightedRandomSampler or stronger class reweighting; reduce label_smoothing; reduce warmup.\n")
 
