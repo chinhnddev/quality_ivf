@@ -189,7 +189,6 @@ class IVF_EffiMorphPP(nn.Module):
         divisor: int = 8,
         task: str = "exp",
         use_coral: bool = False,
-        stage3_dilation: int = 1,  # <-- đổi 1->2 nếu bạn muốn giữ dilation=2
     ):
         super().__init__()
         self.task = task
@@ -225,7 +224,7 @@ class IVF_EffiMorphPP(nn.Module):
         self.stage2 = DWConvBlock(c1, c2, stride=2, dilation=1)
 
         # /2  (dilation configurable)
-        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=stage3_dilation)
+        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=2)
 
         # /2
         self.stage4 = DWConvBlock(c3, c4, stride=2, dilation=1)
