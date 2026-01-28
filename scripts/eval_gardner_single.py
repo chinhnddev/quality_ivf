@@ -82,14 +82,18 @@ def map_exp_gold_value(v: str) -> int:
     return int(token) if token in {"0", "1", "2", "3", "4"} else 5
 
 
-def map_icm_te_gold_value(v: str) -> int:
+def map_icm_te_gold_value(v: str) -> Optional[int]:
+    """Map ICM/TE gold label. Returns None for invalid/excluded labels (-1, 3, NA)."""
     token = normalize_icm_te_token(v)
-    return int(token) if token in {"0", "1", "2"} else 3
+    if token in {"0", "1", "2"}:
+        return int(token)
+    # -1 (NA), 3 (ND), or any other invalid value -> exclude from evaluation
+    return None
 
 
-def map_pred_icm_te(v: int) -> int:
-    # If prediction is not 0/1/2 -> map to 3
-    return v if v in [0, 1, 2] else 3
+def map_pred_icm_te(v: int) -> Optional[int]:
+    # If prediction is not 0/1/2 -> treat as invalid
+    return v if v in [0, 1, 2] else None
 
 
 def map_pred_exp(v: int) -> int:
@@ -321,39 +325,86 @@ def main():
         labels = list(range(eval_num_classes))
 
     else:
-        # Evaluate ICM/TE only when EXP_gt not in [0,1]
+        # Evaluate ICM/TE only when EXP_gt not in [0,1] AND gold label is in {0,1,2}
         col = task.upper()
         exp_pred_label = exp_pred_series.name if exp_pred_series is not None else None
         if exp_pred_label:
             print(f"[ICM/TE] Filtering using predicted EXP column '{exp_pred_label}'.")
+        
+        # Diagnostic logging for raw labels
         raw_series = preds_df[col].fillna("").astype(str).str.strip()
         raw_unique = sorted({val if val != "" else "<EMPTY>" for val in raw_series.unique()})
         raw_numeric = pd.to_numeric(preds_df[col], errors="coerce")
         na_raw_count = int((raw_numeric == -1).sum())
         nd_raw_count = int((raw_numeric == 3).sum())
-        mapped_counts = Counter(map_icm_te_gold_value(v) for v in preds_df[col])
         print(f"[ICM/TE GOLD] Raw label values: {raw_unique}")
-        if na_raw_count:
-            print(f"[ICM/TE GOLD] Raw '-1' (NA) occurrences={na_raw_count} -> mapped to class 3.")
-        if nd_raw_count:
-            print(f"[ICM/TE GOLD] Raw '3' (ND) occurrences={nd_raw_count} -> mapped to class 3.")
-        print(f"[ICM/TE GOLD] Mapped label counts: {dict(sorted(mapped_counts.items()))}")
+        print(f"[ICM/TE GOLD] Samples with label -1 (NA): {na_raw_count}")
+        print(f"[ICM/TE GOLD] Samples with label 3 (ND): {nd_raw_count}")
+        
         filter_by_exp = bool(args.authors_filter_exp01_for_icm_te)
         if filter_by_exp and exp_pred_label:
             print("[ICM/TE] Applying authors exp {0,1} filter.")
+        
+        # Track exclusion reasons
+        excluded_na = 0
+        excluded_nd = 0
+        excluded_other_invalid = 0
+        excluded_exp_gt = 0
+        excluded_exp_pred = 0
+        
         for idx, r in preds_df.iterrows():
             exp_gt = map_exp_gold_value(r["EXP"])
             if filter_by_exp and exp_gt in [0, 1]:
+                excluded_exp_gt += 1
                 continue  # not defined for ICM/TE per authors
             exp_pred = exp_pred_series.loc[idx] if exp_pred_series is not None else None
             if filter_by_exp and exp_pred in [0, 1]:
+                excluded_exp_pred += 1
                 continue
+            
+            # Get gold label - exclude if -1, 3, or invalid
+            raw_gold = str(r[col]).strip() if pd.notna(r[col]) else ""
             gt = map_icm_te_gold_value(r[col])
+            
+            if gt is None:
+                # Determine exclusion reason for logging
+                try:
+                    raw_val = int(float(raw_gold)) if raw_gold else None
+                except (ValueError, TypeError):
+                    raw_val = None
+                
+                if raw_val == -1:
+                    excluded_na += 1
+                elif raw_val == 3:
+                    excluded_nd += 1
+                else:
+                    excluded_other_invalid += 1
+                continue  # Skip this sample from evaluation
+            
             pr = map_pred_icm_te(int(r["y_pred_raw"]))
+            if pr is None:
+                # Prediction outside valid range - still include but map to closest valid
+                pr = int(r["y_pred_raw"])
+                pr = max(0, min(2, pr))  # clamp to valid range
+            
             y_true.append(gt)
             y_pred.append(pr)
             used_images.append(str(r["Image"]))
-        eval_num_classes = 4  # 0..3
+        
+        # Log exclusion statistics
+        print(f"[ICM/TE] Excluded samples breakdown:")
+        print(f"  - Due to gold label -1 (NA): {excluded_na}")
+        print(f"  - Due to gold label 3 (ND): {excluded_nd}")
+        print(f"  - Due to other invalid gold labels: {excluded_other_invalid}")
+        if filter_by_exp:
+            print(f"  - Due to EXP_gt in {{0,1}}: {excluded_exp_gt}")
+            if exp_pred_label:
+                print(f"  - Due to EXP_pred in {{0,1}}: {excluded_exp_pred}")
+        total_excluded = excluded_na + excluded_nd + excluded_other_invalid + excluded_exp_gt + excluded_exp_pred
+        print(f"  - Total excluded: {total_excluded}")
+        print(f"  - Total evaluated: {len(y_true)}")
+        
+        eval_num_classes = 3  # 0, 1, 2 only
         labels = list(range(eval_num_classes))
 
     # Metrics (same names as Table 2 intent)

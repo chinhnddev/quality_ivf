@@ -778,7 +778,8 @@ def train_one_run(cfg, args) -> None:
 
         # val
         val_metrics = evaluate_on_val(model, dl_val, device, use_coral)
-        monitor = val_metrics["macro_f1"]  # align with cfg.monitor.metric if you prefer parsing it
+        monitor_metric = cfg.monitor.metric if hasattr(cfg, 'monitor') and hasattr(cfg.monitor, 'metric') else "macro_f1"
+        monitor = val_metrics[monitor_metric]  # align with cfg.monitor.metric if you prefer parsing it
         print(f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f} | "
               f"val_acc={val_metrics['acc']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
               f"val_weighted_f1={val_metrics['weighted_f1']:.4f}")
