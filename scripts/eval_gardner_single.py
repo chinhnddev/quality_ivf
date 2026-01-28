@@ -220,12 +220,14 @@ def main():
     # Auto-detect CORAL from checkpoint for EXP task
     if args.task == "exp" and "head.4.weight" in state_dict:
         out_dim = state_dict["head.4.weight"].shape[0]
-        inferred_coral = (out_dim == train_num_classes - 1)  # CORAL outputs K-1
+        expected_coral_dim = train_num_classes - 1  # CORAL outputs K-1
+        inferred_coral = (out_dim == expected_coral_dim)
         if not args.use_coral and inferred_coral:
-            print(f"[INFO] Checkpoint has {out_dim} outputs (K-1={train_num_classes-1}); auto-enabling CORAL")
+            print(f"[INFO] Checkpoint has {out_dim} outputs (K-1={expected_coral_dim}); auto-enabling CORAL")
             use_coral_flag = True
         elif args.use_coral and not inferred_coral:
-            print(f"[WARNING] --use_coral=1 but checkpoint has {out_dim} outputs (expected {train_num_classes-1})")
+            print(f"[WARNING] --use_coral=1 but checkpoint has {out_dim} outputs (expected {expected_coral_dim})")
+            use_coral_flag = False
 
     user_provided_thr = args.coral_thr is not None
     coral_thr_value = args.coral_thr if user_provided_thr else DEFAULT_CORAL_THR
@@ -237,7 +239,7 @@ def main():
         else:
             print(f"[AUTO CORAL] No tuned threshold found; falling back to default {coral_thr_value:.2f}")
 
-    # Instantiate model with correct parameters
+    # Instantiate model with updated parameters
     model = IVF_EffiMorphPP(
         num_classes=train_num_classes,
         task=args.task,
@@ -251,13 +253,15 @@ def main():
     # CORAL decoding thresholds
     coral_thresholds = None
     if use_coral_flag and args.task == "exp":
+        num_thresholds = train_num_classes - 1  # K-1
         with torch.no_grad():
             dummy = torch.randn(1, 3, 224, 224).to(device)
             out = model(dummy)
-            expected_outputs = train_num_classes - 1  # CORAL outputs K-1
-            assert out.shape[1] == expected_outputs, f"Expected {expected_outputs} CORAL logits, got {out.shape[1]}"
+            assert out.shape[1] == num_thresholds, \
+                f"Expected {num_thresholds} CORAL logits, got {out.shape[1]}"
         if args.coral_thr_last is not None:
-            coral_thresholds = [coral_thr_value] * (train_num_classes - 2) + [args.coral_thr_last]
+            # Per-threshold: [thr, thr, ..., thr_last]
+            coral_thresholds = [coral_thr_value] * (num_thresholds - 1) + [args.coral_thr_last]
             print(f"[CORAL] Using per-threshold decoding: {coral_thresholds}")
         else:
             coral_thresholds = coral_thr_value
