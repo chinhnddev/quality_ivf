@@ -41,3 +41,5 @@ ENV/
 outputs/
 *.log
 .DS_Store
+splits/
+splits_backup/
