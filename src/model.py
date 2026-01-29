@@ -5,31 +5,6 @@ import math
 
 
 # -------------------------
-# DropPath (Stochastic Depth)
-# -------------------------
-class DropPath(nn.Module):
-    """
-    Drop paths (Stochastic Depth) per sample.
-    Paper: "Deep Networks with Stochastic Depth" https://arxiv.org/abs/1603.09382
-    """
-    def __init__(self, drop_prob: float = 0.0):
-        super().__init__()
-        self.drop_prob = drop_prob
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.drop_prob == 0. or not self.training:
-            return x
-        
-        keep_prob = 1 - self.drop_prob
-        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
-        random_tensor.floor_()
-        
-        output = x.div(keep_prob) * random_tensor
-        return output
-
-
-# -------------------------
 # Attention blocks
 # -------------------------
 class SimAM(nn.Module):
@@ -52,6 +27,10 @@ class SimAM(nn.Module):
 
 
 class ECA(nn.Module):
+    """
+    Efficient Channel Attention
+    Paper: https://arxiv.org/abs/1910.03151
+    """
     def __init__(self, channels: int, k_size: int | None = None):
         super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
@@ -87,9 +66,8 @@ class ECA(nn.Module):
 class MultiScaleBlock(nn.Module):
     """
     Multi-scale convolution block với 3 branches (3x3, 5x5, 7x7)
-    + DropPath regularization
     """
-    def __init__(self, in_channels: int, out_channels: int, drop_path: float = 0.0):
+    def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         c = out_channels // 3
 
@@ -117,9 +95,6 @@ class MultiScaleBlock(nn.Module):
 
         self.simam = SimAM(out_channels)
 
-        # DropPath
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-
         self.use_res = in_channels == out_channels
         if not self.use_res:
             self.skip = nn.Sequential(
@@ -128,15 +103,17 @@ class MultiScaleBlock(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = x if self.use_res else self.skip(x)
+        identity = x
 
-        out = torch.cat([self.branch1(x), self.branch2(x), self.branch3(x)], dim=1)
-        out = self.proj(out)
-        out = self.simam(out)
+        x = torch.cat([self.branch1(x), self.branch2(x), self.branch3(x)], dim=1)
+        x = self.proj(x)
+        x = self.simam(x)
 
-        # Apply DropPath on residual branch
-        out = identity + self.drop_path(out)
-        return out
+        if self.use_res:
+            x = x + identity
+        else:
+            x = x + self.skip(identity)
+        return x
 
 
 # -------------------------
@@ -145,11 +122,9 @@ class MultiScaleBlock(nn.Module):
 class DWConvBlock(nn.Module):
     """
     Depthwise Separable Convolution với residual connection
-    + DropPath regularization
     Hỗ trợ stride=1/2, dilation>=1
     """
-    def __init__(self, in_channels: int, out_channels: int, stride: int = 1, 
-                 dilation: int = 1, drop_path: float = 0.0):
+    def __init__(self, in_channels, out_channels, stride=1, dilation=1):
         super().__init__()
 
         self.dw = nn.Sequential(
@@ -175,29 +150,22 @@ class DWConvBlock(nn.Module):
 
         self.simam = SimAM(out_channels)
 
-        # DropPath
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-
         self.use_res = stride == 1 and in_channels == out_channels
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         identity = x
 
-        out = self.dw(x)
-        out = self.pw(out)
-        out = self.simam(out)
+        x = self.dw(x)
+        x = self.pw(x)
+        x = self.simam(x)
 
         if self.use_res:
-            # Apply DropPath on residual branch
-            out = identity + self.drop_path(out)
-        else:
-            out = out
-
-        return out
+            x = x + identity
+        return x
 
 
 # -------------------------
-# GeM Pooling
+# IVF_EffiMorphPP
 # -------------------------
 class GeM(nn.Module):
     """Generalized Mean Pooling - learnable pooling exponent"""
@@ -211,19 +179,14 @@ class GeM(nn.Module):
             x.clamp(min=self.eps).pow(self.p),
             (x.size(-2), x.size(-1))
         ).pow(1.0 / self.p)
-
-
-# -------------------------
-# IVF_EffiMorphPP
-# -------------------------
+    
 class IVF_EffiMorphPP(nn.Module):
     """
-    IVF_EffiMorphPP with DropPath (Stochastic Depth)
+    IVF_EffiMorphPP (clean)
     - Dynamic interpolation size (no hardcode 7x7)
+    - Residual projection for all DWConvBlocks
     - Adaptive ECA kernel size
-    - GeM Pooling
     - CORAL optional (EXP -> K-1 logits)
-    - DropPath regularization với linear decay
     """
 
     def __init__(
@@ -235,7 +198,6 @@ class IVF_EffiMorphPP(nn.Module):
         divisor: int = 8,
         task: str = "exp",
         use_coral: bool = False,
-        drop_path_rate: float = 0.1,
     ):
         super().__init__()
         self.task = task
@@ -250,11 +212,6 @@ class IVF_EffiMorphPP(nn.Module):
         c3 = make_divisible(8 * base, divisor)
         c4 = make_divisible(16 * base, divisor)
 
-        # Stochastic Depth: Linear decay rule
-        # Tăng dần từ 0 (stage1) đến drop_path_rate (stage4)
-        num_blocks = 4
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, num_blocks)]
-
         # Stem: /2
         self.stem = nn.Sequential(
             nn.Conv2d(3, base, 3, stride=2, padding=1, bias=False),
@@ -263,7 +220,7 @@ class IVF_EffiMorphPP(nn.Module):
         )
 
         # Stage 1 (no downsample)
-        self.stage1 = MultiScaleBlock(base, c1, drop_path=dpr[0])
+        self.stage1 = MultiScaleBlock(base, c1)
 
         # /2
         self.stage1_down = nn.Sequential(
@@ -272,14 +229,14 @@ class IVF_EffiMorphPP(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # Stage 2: /2
-        self.stage2 = DWConvBlock(c1, c2, stride=2, dilation=1, drop_path=dpr[1])
+        # /2
+        self.stage2 = DWConvBlock(c1, c2, stride=2, dilation=2)
 
-        # Stage 3: /2
-        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=2, drop_path=dpr[2])
+        # /2  (dilation configurable)
+        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=2)
 
-        # Stage 4: /2
-        self.stage4 = DWConvBlock(c3, c4, stride=2, dilation=1, drop_path=dpr[3])
+        # /2
+        self.stage4 = DWConvBlock(c3, c4, stride=2, dilation=1)
 
         # Fusion: concat(s2,s3,s4)->c4
         self.fusion = nn.Sequential(
