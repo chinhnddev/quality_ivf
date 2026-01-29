@@ -194,7 +194,7 @@ class IVF_EffiMorphPP(nn.Module):
         num_classes: int,
         dropout_p: float = 0.3,
         width_mult: float = 1.2,
-        base_channels: int = 48,
+        base_channels: int = 32,
         divisor: int = 8,
         task: str = "exp",
         use_coral: bool = False,
