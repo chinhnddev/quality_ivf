@@ -230,10 +230,10 @@ class IVF_EffiMorphPP(nn.Module):
         )
 
         # /2
-        self.stage2 = DWConvBlock(c1, c2, stride=2, dilation=1)
+        self.stage2 = DWConvBlock(c1, c2, stride=2, dilation=2)
 
         # /2  (dilation configurable)
-        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=1)
+        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=2)
 
         # /2
         self.stage4 = DWConvBlock(c3, c4, stride=2, dilation=1)
