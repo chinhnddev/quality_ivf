@@ -276,9 +276,6 @@ class IVF_EffiMorphPP(nn.Module):
         fused = self.fusion(fused)
         fused = self.eca(fused)
 
-        g_fused = self.gap(fused).flatten(1)   # B, c4
-        g_s4    = self.gap(s4).flatten(1)      # B, c4 (explicit global branch)
-
-        x = torch.cat([g_fused, g_s4], dim=1)  # B, 2*c4
+        x = self.gap(fused).flatten(1)
         x = self.dropout(x)
         return self.head(x)
