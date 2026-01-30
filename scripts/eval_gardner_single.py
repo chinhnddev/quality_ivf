@@ -216,17 +216,17 @@ def main():
     # CORAL auto-detect for EXP
     use_coral_flag = bool(args.use_coral)
     state_dict = load_state_dict_robust(args.checkpoint, device)
-    if args.task == "exp" and "head.4.weight" in state_dict:
+    if "head.4.weight" in state_dict:
         out_dim = state_dict["head.4.weight"].shape[0]
-        inferred_coral = (out_dim == 4)
-        if not args.use_coral and inferred_coral:
-            print("[INFO] Checkpoint has 4 outputs; auto-enabling CORAL")
+        inferred_coral = (out_dim == train_num_classes - 1)
+        if not use_coral_flag and inferred_coral:
+            print(f"[INFO] Checkpoint has {out_dim} outputs; auto-enabling CORAL")
             use_coral_flag = True
 
     user_provided_thr = args.coral_thr is not None
     coral_thr_value = args.coral_thr if user_provided_thr else DEFAULT_CORAL_THR
     auto_thr_enabled = bool(args.auto_thr)
-    if use_coral_flag and args.task == "exp" and auto_thr_enabled and not user_provided_thr:
+    if use_coral_flag and auto_thr_enabled and not user_provided_thr:
         auto_thr = find_automatic_coral_threshold(Path(args.checkpoint), Path(args.out_dir))
         if auto_thr is not None:
             coral_thr_value = auto_thr
@@ -240,11 +240,12 @@ def main():
 
     # CORAL decoding thresholds
     coral_thresholds = None
-    if use_coral_flag and args.task == "exp":
+    if use_coral_flag:
         with torch.no_grad():
             dummy = torch.randn(1, 3, 224, 224).to(device)
             out = model(dummy)
-            assert out.shape[1] == 4, f"Expected 4 CORAL logits, got {out.shape[1]}"
+            expected_logits = train_num_classes - 1
+            assert out.shape[1] == expected_logits, f"Expected {expected_logits} CORAL logits, got {out.shape[1]}"
         if args.coral_thr_last is not None:
             coral_thresholds = [coral_thr_value, coral_thr_value, coral_thr_value, args.coral_thr_last]
             print(f"[CORAL] Using per-threshold decoding: {coral_thresholds}")
@@ -265,7 +266,7 @@ def main():
             images = images.to(device, non_blocking=True)
             outputs = model(images)
 
-            if use_coral_flag and args.task == "exp":
+            if use_coral_flag:
                 preds = coral_predict_class(outputs, thresholds=coral_thresholds)
                 probs = torch.sigmoid(outputs)
             else:
@@ -455,7 +456,7 @@ def main():
         "confusion_matrix": cm.tolist(),
         "y_pred_distribution": {"counts": counts_full, "ratios": ratios_full},
     }
-    if use_coral_flag and task == "exp":
+    if use_coral_flag:
         out["coral_thresholds"] = coral_thresholds
 
     with open(metrics_file, "w", encoding="utf-8") as f:

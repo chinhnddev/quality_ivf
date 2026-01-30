@@ -229,7 +229,9 @@ class IVF_EffiMorphPP(nn.Module):
         self.gap = GeM(p=3.0, eps=1e-6)
         self.dropout = nn.Dropout(dropout_p)
 
-        output_dim = num_classes - 1 if (task == "exp" and use_coral) else num_classes
+        if use_coral and num_classes < 2:
+            raise ValueError("CORAL requires at least 2 classes.")
+        output_dim = num_classes - 1 if use_coral else num_classes
         self.head = nn.Sequential(
             nn.Linear(c4, hidden),
             nn.LayerNorm(hidden),

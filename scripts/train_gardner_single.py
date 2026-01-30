@@ -20,6 +20,8 @@ from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 from torchvision import transforms
 from PIL import Image
 
+ORDINAL_TASKS = {"exp", "icm", "te"}
+
 try:
     from torchinfo import summary as torchinfo_summary
 except ImportError:
@@ -114,7 +116,7 @@ def make_loss_fn(
     use_coral: bool = False,
     label_smoothing: float = 0.0,
 ) -> nn.Module:
-    if use_coral and task == "exp":
+    if use_coral and task in ORDINAL_TASKS:
         # CORAL loss for ordinal regression
         return lambda logits, targets: coral_loss(logits, targets, num_classes)
     weights = None
@@ -365,7 +367,15 @@ def collect_coral_logits(model: nn.Module, loader: DataLoader, device: torch.dev
     return torch.cat(logits_acc, dim=0), torch.cat(label_acc, dim=0)
 
 
-def tune_coral_threshold(model: nn.Module, loader: DataLoader, device: torch.device, thr_min: float, thr_max: float, thr_step: float) -> Optional[Dict]:
+def tune_coral_threshold(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    thr_min: float,
+    thr_max: float,
+    thr_step: float,
+    num_classes: int,
+) -> Optional[Dict]:
     logits, labels = collect_coral_logits(model, loader, device)
     if logits.numel() == 0:
         print("[CORAL TUNING] No validation logits collected; skipping threshold search.")
@@ -380,9 +390,10 @@ def tune_coral_threshold(model: nn.Module, loader: DataLoader, device: torch.dev
     best = None
     grid = []
     y_true = labels.numpy()
+    label_range = list(range(num_classes))
     for thr in thr_values:
         preds = coral_predict_class(logits, thresholds=float(thr)).cpu().numpy()
-        f1 = f1_score(y_true, preds, average="weighted", zero_division=0, labels=list(range(5)))
+        f1 = f1_score(y_true, preds, average="weighted", zero_division=0, labels=label_range)
         acc = accuracy_score(y_true, preds)
         grid.append({"threshold": round(float(thr), 4), "val_f1_weighted": float(f1), "val_acc": float(acc)})
         if best is None or f1 > best["f1"] or (
@@ -472,10 +483,10 @@ def train_one_run(cfg, args) -> None:
     # Define flags early
     use_class_weights = bool(cfg.use_class_weights)
     use_weighted_sampler = bool(args.use_weighted_sampler)
-    use_coral = bool(args.use_coral) and task == "exp"
+    use_coral = bool(args.use_coral) and task in ORDINAL_TASKS
     label_smoothing_cfg = float(getattr(cfg.loss, "label_smoothing", 0.0)) if hasattr(cfg, "loss") else 0.0
 
-    loss_name = "CORAL_BCEWithLogits" if use_coral and task == "exp" else ("CrossEntropyLoss" if task == "exp" else "FocalLoss")
+    loss_name = "CORAL_BCEWithLogits" if use_coral else ("CrossEntropyLoss" if task == "exp" else "FocalLoss")
     applied_smoothing = 0.0
     if not use_coral and task == "exp" and not (use_weighted_sampler or sanity_mode):
         applied_smoothing = label_smoothing_cfg
@@ -554,13 +565,16 @@ def train_one_run(cfg, args) -> None:
         print(f"[SANITY MODE] Using dropout_p=0.0 for overfitting test")
 
     # Safety check for CORAL
-    if use_coral and task == "exp":
+    if use_coral:
         # Test forward pass to check output shape
         with torch.no_grad():
             dummy_input = torch.randn(1, 3, 224, 224).to(device)
             dummy_output = model(dummy_input)
-            assert dummy_output.shape[1] == 4, f"Expected 4 CORAL logits for EXP, got {dummy_output.shape[1]}"
-        print(f"[CORAL] Model outputs {dummy_output.shape[1]} logits for EXP ordinal regression")
+            expected_coral = num_classes - 1
+            assert dummy_output.shape[1] == expected_coral, (
+                f"Expected {expected_coral} CORAL logits for {task}, got {dummy_output.shape[1]}"
+            )
+        print(f"[CORAL] Model outputs {expected_coral} logits for {task} ordinal regression")
 
     # Dataloaders
     batch_size = int(cfg.train.batch_size)
@@ -631,8 +645,8 @@ def train_one_run(cfg, args) -> None:
     else:
         opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
         print(f"Using Adam optimizer: lr={lr}, weight_decay={wd}")
-    if use_coral and task == "exp":
-        print("Optimizer=Adam wd=0.0 | label_smoothing=0.0 | loss=CORAL")
+    if use_coral:
+        print(f"Optimizer=Adam wd=0.0 | label_smoothing=0.0 | loss=CORAL (task={task})")
     
     epochs = int(cfg.train.epochs)
     warmup_epochs = int(getattr(scheduler_cfg, 'warmup_epochs', 0))
@@ -872,8 +886,8 @@ def train_one_run(cfg, args) -> None:
         print(f"[SWA VAL] acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}")
 
     threshold_result = None
-    if task == "exp" and use_coral and tune_coral_thr:
-        threshold_result = tune_coral_threshold(eval_model, dl_val, device, thr_min, thr_max, thr_step)
+    if use_coral and tune_coral_thr:
+        threshold_result = tune_coral_threshold(eval_model, dl_val, device, thr_min, thr_max, thr_step, num_classes)
         if threshold_result:
             threshold_payload = {
                 "best_coral_thr": threshold_result["best_thr"],
@@ -948,7 +962,12 @@ def main():
     parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--use_class_weights", type=int, default=None)
     parser.add_argument("--use_weighted_sampler", type=int, default=0, help="Use WeightedRandomSampler for training (0=OFF, 1=ON)")
-    parser.add_argument("--use_coral", type=int, default=0, help="Use CORAL ordinal regression for EXP task (0=OFF, 1=ON)")
+    parser.add_argument(
+        "--use_coral",
+        type=int,
+        default=0,
+        help="Use CORAL ordinal regression for EXP/ICM/TE tasks (0=OFF, 1=ON)",
+    )
 
     parser.add_argument("--lr", type=float, default=None, help="Base learning rate (paper default 5e-4).")
     parser.add_argument("--warmup_lr", type=float, default=None, help="Warmup learning rate (paper default 1e-6).")
