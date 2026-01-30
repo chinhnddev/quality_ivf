@@ -202,10 +202,10 @@ class GardnerDataset(Dataset):
     def _build_transform(self, aug: Optional[dict], sanity_mode: bool = False):
         if self.split == "train" and not sanity_mode:
             transform = transforms.Compose([
-                transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1)),                
+                transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.95, 1.05)),                
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomVerticalFlip(p=0.5),
-                transforms.RandomRotation(degrees=10),
+                transforms.RandomRotation(degrees=15),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ])
