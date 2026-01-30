@@ -233,10 +233,10 @@ class IVF_EffiMorphPP(nn.Module):
         self.stage2 = DWConvBlock(c1, c2, stride=1, dilation=1)
 
         # /2  (dilation configurable)
-        self.stage3 = DWConvBlock(c2, c3, stride=1, dilation=2)
+        self.stage3 = DWConvBlock(c2, c3, stride=1, dilation=3)
 
         # /2
-        self.stage4 = DWConvBlock(c3, c4, stride=1, dilation=4)
+        self.stage4 = DWConvBlock(c3, c4, stride=1, dilation=6)
 
         # Fusion: concat(s2,s3,s4)->c4
         self.fusion = nn.Sequential(
