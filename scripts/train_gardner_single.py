@@ -202,8 +202,7 @@ class GardnerDataset(Dataset):
     def _build_transform(self, aug: Optional[dict], sanity_mode: bool = False):
         if self.split == "train" and not sanity_mode:
             transform = transforms.Compose([
-                transforms.RandomResizedCrop(224, scale=(0.75, 1.0), ratio=(0.9, 1.1)),
-                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1)),                transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomVerticalFlip(p=0.5),
                 transforms.RandomRotation(degrees=15),
                 transforms.ToTensor(),
