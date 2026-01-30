@@ -124,7 +124,7 @@ class DWConvBlock(nn.Module):
     Depthwise Separable Convolution với residual connection
     Hỗ trợ stride=1/2, dilation>=1
     """
-    def __init__(self, in_channels, out_channels, stride=1, dilation=1, use_cbam=False):
+    def __init__(self, in_channels, out_channels, stride=1, dilation=1):
         super().__init__()
 
         self.dw = nn.Sequential(
@@ -148,12 +148,6 @@ class DWConvBlock(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # CBAM attention (optional)
-        if use_cbam:
-            self.cbam = CBAM(out_channels)  # ← SẼ THÊM CLASS CBAM Ở DƯỚI
-        else:
-            self.cbam = nn.Identity()
-
         self.simam = SimAM(out_channels)
 
         self.use_res = stride == 1 and in_channels == out_channels
@@ -163,7 +157,6 @@ class DWConvBlock(nn.Module):
 
         x = self.dw(x)
         x = self.pw(x)
-        x = self.cbam(x)  # Add before simam
         x = self.simam(x)
 
         if self.use_res:
@@ -186,70 +179,7 @@ class GeM(nn.Module):
             x.clamp(min=self.eps).pow(self.p),
             (x.size(-2), x.size(-1))
         ).pow(1.0 / self.p)
-
-class CBAM(nn.Module):
-    """
-    Convolutional Block Attention Module
-    Paper: https://arxiv.org/abs/1807.06521
-    Combines Channel Attention + Spatial Attention
-    """
-    def __init__(self, channels: int, reduction: int = 16, kernel_size: int = 7):
-        super().__init__()
-        
-        # ════════════════════════════════════════════════════════
-        # Channel Attention Module
-        # ════════════════════════════════════════════════════════
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        
-        self.fc = nn.Sequential(
-            nn.Linear(channels, channels // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(channels // reduction, channels, bias=False),
-        )
-        
-        # ════════════════════════════════════════════════════════
-        # Spatial Attention Module
-        # ════════════════════════════════════════════════════════
-        self.conv = nn.Conv2d(
-            2, 1, 
-            kernel_size=kernel_size, 
-            padding=kernel_size // 2, 
-            bias=False
-        )
-        
-        self.sigmoid = nn.Sigmoid()
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, c, h, w = x.size()
-        
-        # ════════════════════════════════════════════════════════
-        # Channel Attention
-        # ════════════════════════════════════════════════════════
-        # Average pooling
-        avg_out = self.avg_pool(x).view(b, c)
-        avg_out = self.fc(avg_out).view(b, c, 1, 1)
-        
-        # Max pooling
-        max_out = self.max_pool(x).view(b, c)
-        max_out = self.fc(max_out).view(b, c, 1, 1)
-        
-        # Combine
-        channel_att = self.sigmoid(avg_out + max_out)
-        x = x * channel_att
-        
-        # ════════════════════════════════════════════════════════
-        # Spatial Attention
-        # ════════════════════════════════════════════════════════
-        # Average & max along channel dimension
-        avg_out = torch.mean(x, dim=1, keepdim=True)  # B,1,H,W
-        max_out, _ = torch.max(x, dim=1, keepdim=True)  # B,1,H,W
-        
-        # Concatenate and convolve
-        spatial_att = self.sigmoid(self.conv(torch.cat([avg_out, max_out], dim=1)))
-        x = x * spatial_att
-        
-        return x
 class IVF_EffiMorphPP(nn.Module):
     """
     IVF_EffiMorphPP (clean)
@@ -300,13 +230,13 @@ class IVF_EffiMorphPP(nn.Module):
         )
 
         # /2
-        self.stage2 = DWConvBlock(c1, c2, stride=2, dilation=1)
+        self.stage2 = DWConvBlock(c1, c2, stride=1, dilation=1)
 
         # /2  (dilation configurable)
-        self.stage3 = DWConvBlock(c2, c3, stride=2, dilation=1)
+        self.stage3 = DWConvBlock(c2, c3, stride=1, dilation=2)
 
         # /2
-        self.stage4 = DWConvBlock(c3, c4, stride=2, dilation=1)
+        self.stage4 = DWConvBlock(c3, c4, stride=1, dilation=4)
 
         # Fusion: concat(s2,s3,s4)->c4
         self.fusion = nn.Sequential(
