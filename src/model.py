@@ -252,7 +252,7 @@ class IVF_EffiMorphPP(nn.Module):
 
         output_dim = num_classes - 1 if (task == "exp" and use_coral) else num_classes
         self.head = nn.Sequential(
-            nn.Linear(2 * c4, hidden), 
+            nn.Linear(c4, hidden), 
             nn.LayerNorm(hidden),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout_p * 0.5),
