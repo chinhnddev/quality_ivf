@@ -230,13 +230,13 @@ class IVF_EffiMorphPP(nn.Module):
         )
 
         # /2
-        self.stage2 = DWConvBlock(c1, c2, stride=1, dilation=1)
+        self.stage2 = DWConvBlock(c1, c2, stride=2, dilation=1)
 
         # /2  (dilation configurable)
-        self.stage3 = DWConvBlock(c2, c3, stride=1, dilation=3)
+        self.stage3 = DWConvBlock(c2, c3, stride=1, dilation=2)
 
         # /2
-        self.stage4 = DWConvBlock(c3, c4, stride=1, dilation=6)
+        self.stage4 = DWConvBlock(c3, c4, stride=1, dilation=4)
 
         # Fusion: concat(s2,s3,s4)->c4
         self.fusion = nn.Sequential(
@@ -252,7 +252,7 @@ class IVF_EffiMorphPP(nn.Module):
 
         output_dim = num_classes - 1 if (task == "exp" and use_coral) else num_classes
         self.head = nn.Sequential(
-            nn.Linear(c4, hidden),
+            nn.Linear(2 * c4, hidden), 
             nn.LayerNorm(hidden),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout_p * 0.5),
@@ -276,6 +276,9 @@ class IVF_EffiMorphPP(nn.Module):
         fused = self.fusion(fused)
         fused = self.eca(fused)
 
-        x = self.gap(fused).flatten(1)
+        g_fused = self.gap(fused).flatten(1)   # B, c4
+        g_s4    = self.gap(s4).flatten(1)      # B, c4 (explicit global branch)
+
+        x = torch.cat([g_fused, g_s4], dim=1)  # B, 2*c4
         x = self.dropout(x)
         return self.head(x)
