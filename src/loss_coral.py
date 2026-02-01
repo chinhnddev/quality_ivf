@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.coral_thresholds import decode_coral_predictions
+
 
 def coral_encode_targets(y: torch.Tensor, num_classes: int) -> torch.Tensor:
     """
@@ -71,30 +73,7 @@ def coral_predict_class(logits: torch.Tensor, thresholds = 0.5) -> torch.Tensor:
     Returns:
         y_pred: (B,) predicted class labels in [0, K-1]
     """
-    # Convert logits to probabilities
-    probs = torch.sigmoid(logits)  # (B, K-1)
-
-    # Handle thresholds: scalar or list
-    if isinstance(thresholds, (int, float)):
-        # Scalar: broadcast to all K-1 thresholds
-        exceeds = (probs > thresholds).float()
-    else:
-        # List/tensor of thresholds
-        thresholds_tensor = torch.as_tensor(thresholds, device=logits.device, dtype=logits.dtype)
-        if thresholds_tensor.dim() == 0:
-            # Scalar tensor -> broadcast
-            exceeds = (probs > thresholds_tensor).float()
-        else:
-            # 1D tensor of length K-1
-            assert thresholds_tensor.shape[0] == logits.shape[1], \
-                f"thresholds length ({thresholds_tensor.shape[0]}) must match logits dim 1 ({logits.shape[1]})"
-            exceeds = (probs > thresholds_tensor.unsqueeze(0)).float()
-
-    # Count how many thresholds are exceeded
-    # y_pred = sum over k where prob_k > threshold_k
-    y_pred = exceeds.sum(dim=1).long()
-
-    return y_pred
+    return decode_coral_predictions(logits, thresholds)
 
 
 def coral_loss_masked(logits: torch.Tensor, y: torch.Tensor, num_classes: int, ignore_index: int = -1) -> torch.Tensor:

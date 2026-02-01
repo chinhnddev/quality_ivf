@@ -25,8 +25,13 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
+from src.coral_thresholds import (
+    DEFAULT_CORAL_THRESHOLD,
+    decode_coral_predictions,
+    load_threshold_payload,
+    prepare_threshold_vector,
+)
 from src.dataset import GardnerDataset
-from src.loss_coral import coral_predict_class
 from src.model import IVF_EffiMorphPP
 from src.utils import normalize_exp_token, normalize_icm_te_token
 
@@ -140,21 +145,31 @@ def extract_predicted_exp_series(preds_df: pd.DataFrame) -> Optional[pd.Series]:
     return None
 
 
-DEFAULT_CORAL_THR = 0.5
-
-
 def find_automatic_coral_threshold(
     checkpoint: Path,
     out_dir: Path,
     is_swa_checkpoint: Optional[bool],
-) -> Optional[float]:
+    explicit_path: Optional[str] = None,
+) -> Optional[Path]:
+    if explicit_path:
+        explicit = Path(explicit_path)
+        if explicit.exists():
+            return explicit
+        print(f"[AUTO CORAL] Threshold path provided but not found: {explicit}")
+        return None
+
     names = []
     if is_swa_checkpoint is True:
-        names.append("best_threshold_swa.json")
+        names.extend(["best_threshold_vector_swa.json", "best_threshold_swa.json"])
     elif is_swa_checkpoint is False:
-        names.append("best_threshold_bestckpt.json")
+        names.extend(["best_threshold_vector_bestckpt.json", "best_threshold_bestckpt.json"])
     else:
-        names.extend(["best_threshold_bestckpt.json", "best_threshold_swa.json"])
+        names.extend([
+            "best_threshold_vector_bestckpt.json",
+            "best_threshold_bestckpt.json",
+            "best_threshold_vector_swa.json",
+            "best_threshold_swa.json",
+        ])
     names.append("best_coral_threshold.json")
 
     candidates = []
@@ -162,30 +177,20 @@ def find_automatic_coral_threshold(
         candidates.append(checkpoint.parent)
     if out_dir:
         candidates.append(out_dir)
+
     seen_roots = set()
     seen_paths = set()
     for root in candidates:
-        if root in seen_roots or not root:
+        if not root or root in seen_roots:
             continue
         seen_roots.add(root)
         for name in names:
-            thr_path = root / name
-            if thr_path in seen_paths:
+            path = root / name
+            if path in seen_paths:
                 continue
-            seen_paths.add(thr_path)
-            if not thr_path.exists():
-                continue
-            try:
-                with thr_path.open("r", encoding="utf-8") as f:
-                    payload = json.load(f)
-                thr_value = payload.get("best_coral_thr")
-                if thr_value is None:
-                    continue
-                thr_value = float(thr_value)
-                print(f"[AUTO CORAL] Loaded tuned threshold {thr_value:.4f} from {thr_path}")
-                return thr_value
-            except Exception as exc:
-                print(f"[AUTO CORAL] Failed to read {thr_path}: {exc}")
+            seen_paths.add(path)
+            if path.exists():
+                return path
     return None
 
 
@@ -206,9 +211,11 @@ def main():
     parser.add_argument("--no_strict", action="store_true")
     parser.add_argument("--use_coral", type=int, default=0)
     parser.add_argument("--coral_thr", type=float, default=None,
-                        help=f"Uniform CORAL threshold for EXP (default {DEFAULT_CORAL_THR}).")
+                        help=f"Uniform CORAL threshold for EXP (default {DEFAULT_CORAL_THRESHOLD}).")
     parser.add_argument("--auto_thr", type=int, choices=[0, 1], default=1,
                         help="Automatically load tuned CORAL threshold when --coral_thr is not provided.")
+    parser.add_argument("--coral_threshold_path", type=str, default=None,
+                        help="Explicit path to a CORAL threshold JSON file (vector or scalar).")
     parser.add_argument("--authors_filter_exp01_for_icm_te", type=int, choices=[0, 1], default=1,
                         help="When evaluating ICM/TE, skip samples where either EXP_gt or EXP_pred is in {0,1}.")
     parser.add_argument("--coral_thr_last", type=float, default=None)
@@ -259,16 +266,58 @@ def main():
             use_coral_flag = True
 
     user_provided_thr = args.coral_thr is not None
-    coral_thr_value = args.coral_thr if user_provided_thr else DEFAULT_CORAL_THR
-    auto_thr_enabled = bool(args.auto_thr)
-    if use_coral_flag and auto_thr_enabled and not user_provided_thr:
-        auto_thr = find_automatic_coral_threshold(
-            Path(args.checkpoint), Path(args.out_dir), is_swa_ckpt
-        )
-        if auto_thr is not None:
-            coral_thr_value = auto_thr
+    coral_thresholds: Optional[List[float]] = None
+    coral_threshold_path: Optional[Path] = None
+    coral_threshold_source = "default"
+    num_boundaries = train_num_classes - 1
+    if use_coral_flag:
+        coral_thresholds = [DEFAULT_CORAL_THRESHOLD] * num_boundaries
+        if user_provided_thr:
+            coral_thresholds = [float(args.coral_thr)] * num_boundaries
+            coral_threshold_source = "cli"
+            coral_threshold_path = None
         else:
-            print(f"[AUTO CORAL] No tuned threshold found; falling back to default {coral_thr_value:.2f}")
+            threshold_path = None
+            if args.coral_threshold_path:
+                threshold_path = find_automatic_coral_threshold(
+                    Path(args.checkpoint),
+                    Path(args.out_dir),
+                    is_swa_ckpt,
+                    explicit_path=args.coral_threshold_path,
+                )
+            elif bool(args.auto_thr):
+                threshold_path = find_automatic_coral_threshold(
+                    Path(args.checkpoint),
+                    Path(args.out_dir),
+                    is_swa_ckpt,
+                )
+            if threshold_path:
+                payload = load_threshold_payload(threshold_path)
+                if payload:
+                    try:
+                        coral_thresholds = prepare_threshold_vector(payload, num_boundaries)
+                        payload_type = payload.get("type", "")
+                        coral_threshold_source = (
+                            "vector" if payload_type == "vector" else "uniform"
+                        )
+                        coral_threshold_path = threshold_path
+                        print(f"[AUTO CORAL] Loaded tuned {coral_threshold_source} thresholds from {threshold_path}")
+                    except Exception as exc:
+                        print(f"[AUTO CORAL] Failed to parse thresholds from {threshold_path}: {exc}")
+                        coral_threshold_source = "default"
+                        coral_threshold_path = None
+                else:
+                    print(f"[AUTO CORAL] Failed to read threshold payload from {threshold_path}")
+            elif bool(args.auto_thr):
+                print(f"[AUTO CORAL] No tuned threshold found; falling back to default {DEFAULT_CORAL_THRESHOLD:.2f}")
+        if args.coral_thr_last is not None:
+            coral_thresholds = coral_thresholds.copy()
+            coral_thresholds[-1] = float(args.coral_thr_last)
+            print(f"[CORAL] Overriding last threshold with {args.coral_thr_last:.4f}")
+        if coral_threshold_source == "vector":
+            print(f"[CORAL] Using vector thresholds: {coral_thresholds}")
+        else:
+            print(f"[CORAL] Using uniform threshold: {coral_thresholds[0]:.6f}")
 
     model = IVF_EffiMorphPP(train_num_classes, task=args.task, use_coral=use_coral_flag).to(device)
     strict = not args.no_strict
@@ -276,19 +325,12 @@ def main():
     model.eval()
 
     # CORAL decoding thresholds
-    coral_thresholds = None
     if use_coral_flag:
         with torch.no_grad():
             dummy = torch.randn(1, 3, 224, 224).to(device)
             out = model(dummy)
             expected_logits = train_num_classes - 1
             assert out.shape[1] == expected_logits, f"Expected {expected_logits} CORAL logits, got {out.shape[1]}"
-        if args.coral_thr_last is not None:
-            coral_thresholds = [coral_thr_value, coral_thr_value, coral_thr_value, args.coral_thr_last]
-            print(f"[CORAL] Using per-threshold decoding: {coral_thresholds}")
-        else:
-            coral_thresholds = coral_thr_value
-            print(f"[CORAL] Using uniform threshold: {coral_thresholds}")
 
     # Predict
     all_preds: List[int] = []
@@ -304,7 +346,7 @@ def main():
             outputs = model(images)
 
             if use_coral_flag:
-                preds = coral_predict_class(outputs, thresholds=coral_thresholds)
+                preds = decode_coral_predictions(outputs, thresholds=coral_thresholds)
                 probs = torch.sigmoid(outputs)
             else:
                 probs = torch.softmax(outputs, dim=1)
@@ -499,6 +541,8 @@ def main():
     out["checkpoint_metadata"] = ckpt_meta
     if use_coral_flag:
         out["coral_thresholds"] = coral_thresholds
+        out["coral_threshold_source"] = coral_threshold_source
+        out["coral_threshold_path"] = str(coral_threshold_path) if coral_threshold_path else None
 
     with open(metrics_file, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, ensure_ascii=False)

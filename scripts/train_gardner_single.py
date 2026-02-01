@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import CORAL functions
 from src.loss_coral import coral_loss, coral_predict_class
+from src.coral_thresholds import tune_vector_thresholds
 from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_distribution
 
 
@@ -363,48 +364,8 @@ def collect_coral_logits(model: nn.Module, loader: DataLoader, device: torch.dev
             logits_acc.append(logits.detach().cpu())
             label_acc.append(y.detach().cpu())
     if not logits_acc:
-        return torch.empty((0, 4)), torch.empty((0,), dtype=torch.long)
+        return torch.empty((0, 0)), torch.empty((0,), dtype=torch.long)
     return torch.cat(logits_acc, dim=0), torch.cat(label_acc, dim=0)
-
-
-def tune_coral_threshold(
-    model: nn.Module,
-    loader: DataLoader,
-    device: torch.device,
-    thr_min: float,
-    thr_max: float,
-    thr_step: float,
-    num_classes: int,
-) -> Optional[Dict]:
-    logits, labels = collect_coral_logits(model, loader, device)
-    if logits.numel() == 0:
-        print("[CORAL TUNING] No validation logits collected; skipping threshold search.")
-        return None
-    thr_min = float(thr_min)
-    thr_max = float(thr_max)
-    thr_step = float(thr_step)
-    if thr_step <= 0 or thr_min > thr_max:
-        print("[CORAL TUNING] Invalid threshold search range; skipping.")
-        return None
-    thr_values = np.arange(thr_min, thr_max + 1e-8, thr_step)
-    best = None
-    grid = []
-    y_true = labels.numpy()
-    label_range = list(range(num_classes))
-    for thr in thr_values:
-        preds = coral_predict_class(logits, thresholds=float(thr)).cpu().numpy()
-        f1 = f1_score(y_true, preds, average="weighted", zero_division=0, labels=label_range)
-        acc = accuracy_score(y_true, preds)
-        grid.append({"threshold": round(float(thr), 4), "val_f1_weighted": float(f1), "val_acc": float(acc)})
-        if best is None or f1 > best["f1"] or (
-            abs(f1 - best["f1"]) < 1e-8 and acc > best["acc"]
-        ):
-            best = {"thr": float(thr), "f1": float(f1), "acc": float(acc)}
-    if best is not None:
-        print(f"[CORAL TUNING] Best uniform threshold={best['thr']:.4f} | val_f1_weighted={best['f1']:.4f} | val_acc={best['acc']:.4f}")
-        return {"best_thr": best["thr"], "best_f1": best["f1"], "best_acc": best["acc"], "grid": grid}
-    return None
-
 
 def train_one_run(cfg, args) -> None:
     task = cfg.task
@@ -444,6 +405,7 @@ def train_one_run(cfg, args) -> None:
     image_col = cfg.data.image_col if "data" in cfg else "Image"
     image_size = int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size)
     augmentation_cfg = cfg.augmentation if "augmentation" in cfg else {}
+
     ds_train = GardnerDataset(
         csv_path=train_csv,
         images_root=images_root,
@@ -488,8 +450,6 @@ def train_one_run(cfg, args) -> None:
     use_weighted_sampler = bool(args.use_weighted_sampler)
     use_coral = bool(args.use_coral) and task in ORDINAL_TASKS
     label_smoothing_cfg = float(getattr(cfg.loss, "label_smoothing", 0.0)) if hasattr(cfg, "loss") else 0.0
-    swa_cfg = getattr(cfg, "swa", OmegaConf.create({}))
-    use_swa = bool(getattr(swa_cfg, "use", False))
 
     loss_name = "CORAL_BCEWithLogits" if use_coral else ("CrossEntropyLoss" if task == "exp" else "FocalLoss")
     applied_smoothing = 0.0
@@ -659,6 +619,7 @@ def train_one_run(cfg, args) -> None:
     # Optimizer / scheduler
     optimizer_cfg = cfg.optimizer
     scheduler_cfg = getattr(cfg, "scheduler", {})
+    swa_cfg = getattr(cfg, "swa", {})
     coral_cfg = getattr(cfg, "coral_tuning", {})
     lr = float(optimizer_cfg.lr)
     wd = float(optimizer_cfg.weight_decay)
@@ -862,11 +823,11 @@ def train_one_run(cfg, args) -> None:
             loss = loss_fn(logits, y)
             loss.backward()
             opt.step()
+            running += loss.item() * x.size(0)
+            n += x.size(0)
             if scheduler_active:
                 scheduler.step()  # Update LR after each batch
             global_step += 1
-            running += loss.item() * x.size(0)
-            n += x.size(0)
 
         train_loss = running / max(n, 1)
 
@@ -902,8 +863,8 @@ def train_one_run(cfg, args) -> None:
 
     # SWA finalization / CORAL tuning
     swa_ckpt_path = out_dir / "best_swa.ckpt"
-    threshold_best_path = out_dir / "best_threshold_bestckpt.json"
-    threshold_swa_path = out_dir / "best_threshold_swa.json"
+    threshold_best_path = out_dir / "best_threshold_vector_bestckpt.json"
+    threshold_swa_path = out_dir / "best_threshold_vector_swa.json"
     swa_val_metrics = None
 
     if use_swa:
@@ -925,58 +886,54 @@ def train_one_run(cfg, args) -> None:
         swa_val_metrics = evaluate_on_val(swa_model, dl_val, device, use_coral, verbose=True, task=task)
         print(f"[SWA VAL] acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}")
 
-    def _write_threshold_file(result: Dict, path: Path, ckpt_path: Path, is_swa_ckpt: bool, epoch_value: Optional[int], step_value: Optional[int]) -> None:
-        payload = {
-            "checkpoint": str(ckpt_path),
-            "is_swa": is_swa_ckpt,
-            "epoch": epoch_value,
-            "global_step": step_value,
-            "best_coral_thr": result["best_thr"],
-            "metric": {
-                "val_f1_weighted": result["best_f1"],
-                "val_acc": result["best_acc"],
-            },
-            "grid": result["grid"],
-        }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        label = "SWA" if is_swa_ckpt else "best"
-        print(f"[CORAL TUNING] Saved tuned threshold for {label} checkpoint to {path}")
-
     best_threshold_result: Optional[Dict] = None
     swa_threshold_result: Optional[Dict] = None
     if use_coral and tune_coral_thr:
-        print("[CORAL TUNING] Running threshold search for best checkpoint")
+        print("[CORAL TUNING] Running vector threshold search for best checkpoint")
         if best_path.exists():
             best_eval_model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=float(cfg.model.dropout), task=task, use_coral=use_coral)
             best_eval_model.to(device)
             best_ckpt = torch.load(best_path, map_location=device)
             best_state = best_ckpt.get("state_dict", best_ckpt)
             best_eval_model.load_state_dict(best_state)
-            best_threshold_result = tune_coral_threshold(best_eval_model, dl_val, device, thr_min, thr_max, thr_step, num_classes)
+            best_logits, best_labels = collect_coral_logits(best_eval_model, dl_val, device)
+            best_threshold_result = tune_vector_thresholds(
+                best_logits,
+                best_labels,
+                thr_min,
+                thr_max,
+                thr_step,
+                num_classes,
+                iterations=3,
+                ckpt_path=best_path,
+            )
             if best_threshold_result:
-                _write_threshold_file(
-                    best_threshold_result,
-                    threshold_best_path,
-                    best_path,
-                    False,
-                    best_ckpt.get("epoch"),
-                    best_ckpt.get("global_step"),
+                with open(threshold_best_path, "w", encoding="utf-8") as f:
+                    json.dump(best_threshold_result, f, indent=2)
+                print(
+                    f"[CORAL TUNING] Saved vector thresholds for best ckpt: {best_threshold_result['thresholds']} -> {threshold_best_path}"
                 )
         else:
             print(f"[CORAL TUNING] Best checkpoint missing ({best_path}); skipping threshold search.")
 
         if use_swa and swa_model is not None:
-            print("[CORAL TUNING] Running threshold search for SWA checkpoint")
-            swa_threshold_result = tune_coral_threshold(swa_model, dl_val, device, thr_min, thr_max, thr_step, num_classes)
+            print("[CORAL TUNING] Running vector threshold search for SWA checkpoint")
+            swa_logits, swa_labels = collect_coral_logits(swa_model, dl_val, device)
+            swa_threshold_result = tune_vector_thresholds(
+                swa_logits,
+                swa_labels,
+                thr_min,
+                thr_max,
+                thr_step,
+                num_classes,
+                iterations=3,
+                ckpt_path=swa_ckpt_path,
+            )
             if swa_threshold_result:
-                _write_threshold_file(
-                    swa_threshold_result,
-                    threshold_swa_path,
-                    swa_ckpt_path,
-                    True,
-                    epochs,
-                    global_step,
+                with open(threshold_swa_path, "w", encoding="utf-8") as f:
+                    json.dump(swa_threshold_result, f, indent=2)
+                print(
+                    f"[CORAL TUNING] Saved vector thresholds for SWA ckpt: {swa_threshold_result['thresholds']} -> {threshold_swa_path}"
                 )
 
     # Write debug report
@@ -997,11 +954,11 @@ def train_one_run(cfg, args) -> None:
             f.write(f"SWA val metrics: acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}\n")
             f.write(f"SWA confusion matrix:\n{np.array(swa_val_metrics.get('confusion_matrix', []))}\n")
         if best_threshold_result is not None:
-            f.write(f"Best checkpoint CORAL threshold: {best_threshold_result['best_thr']:.4f} (saved to {threshold_best_path})\n")
-            f.write(f"  val_f1_weighted={best_threshold_result['best_f1']:.4f} | val_acc={best_threshold_result['best_acc']:.4f}\n")
+            f.write(f"Best checkpoint vector CORAL thresholds: {best_threshold_result['thresholds']} saved to {threshold_best_path}\n")
+            f.write(f"  val_acc={best_threshold_result['val_acc']:.4f} | val_weighted_f1={best_threshold_result['val_weighted_f1']:.4f}\n")
         if swa_threshold_result is not None:
-            f.write(f"SWA checkpoint CORAL threshold: {swa_threshold_result['best_thr']:.4f} (saved to {threshold_swa_path})\n")
-            f.write(f"  val_f1_weighted={swa_threshold_result['best_f1']:.4f} | val_acc={swa_threshold_result['best_acc']:.4f}\n")
+            f.write(f"SWA checkpoint vector CORAL thresholds: {swa_threshold_result['thresholds']} saved to {threshold_swa_path}\n")
+            f.write(f"  val_acc={swa_threshold_result['val_acc']:.4f} | val_weighted_f1={swa_threshold_result['val_weighted_f1']:.4f}\n")
 
         # Check for majority-class collapse
         max_ratio = max(val_metrics['y_pred_ratios'].values()) if val_metrics['y_pred_ratios'] else 0
