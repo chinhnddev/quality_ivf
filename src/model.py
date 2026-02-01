@@ -118,28 +118,15 @@ class MultiScaleBlock(nn.Module):
 # Depthwise block with residual
 # -------------------------
 class DWConvBlock(nn.Module):
-    """
-    Depthwise Separable Convolution với residual connection
-    Hỗ trợ stride=1/2, dilation>=1
-    """
     def __init__(self, in_channels, out_channels, stride=1, dilation=1):
         super().__init__()
 
         self.dw = nn.Sequential(
-            nn.Conv2d(
-                in_channels,
-                in_channels,
-                kernel_size=3,
-                stride=stride,
-                padding=dilation,
-                dilation=dilation,
-                groups=in_channels,
-                bias=False,
-            ),
+            nn.Conv2d(in_channels, in_channels, 3, stride=stride,
+                      padding=dilation, dilation=dilation, groups=in_channels, bias=False),
             nn.BatchNorm2d(in_channels),
             nn.ReLU(inplace=True),
         )
-
         self.pw = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, 1, bias=False),
             nn.BatchNorm2d(out_channels),
@@ -147,14 +134,24 @@ class DWConvBlock(nn.Module):
         )
 
         self.simam = SimAM(out_channels)
-        self.use_res = stride == 1 and in_channels == out_channels
+
+        self.use_res = (stride == 1)
+        self.skip = None
+        if self.use_res and in_channels != out_channels:
+            self.skip = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 1, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
 
     def forward(self, x):
         identity = x
         x = self.dw(x)
         x = self.pw(x)
         x = self.simam(x)
+
         if self.use_res:
+            if self.skip is not None:
+                identity = self.skip(identity)
             x = x + identity
         return x
 
