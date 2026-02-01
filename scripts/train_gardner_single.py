@@ -441,15 +441,18 @@ def train_one_run(cfg, args) -> None:
     # Build datasets (train/val filtered properly)
     # If sanity test is requested, create datasets with sanity_mode=True (deterministic transforms)
     sanity_mode = bool(args.sanity_overfit)
+    image_col = cfg.data.image_col if "data" in cfg else "Image"
+    image_size = int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size)
+    augmentation_cfg = cfg.augmentation if "augmentation" in cfg else {}
     ds_train = GardnerDataset(
         csv_path=train_csv,
         images_root=images_root,
         task=task,
         split="train",
-        image_col=cfg.data.image_col if "data" in cfg else "Image",
+        image_col=image_col,
         label_col=label_col,
-        image_size=int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size),
-        augmentation_cfg=cfg.augmentation if "augmentation" in cfg else {},
+        image_size=image_size,
+        augmentation_cfg=augmentation_cfg,
         sanity_mode=sanity_mode,
     )
     ds_val = GardnerDataset(
@@ -457,10 +460,10 @@ def train_one_run(cfg, args) -> None:
         images_root=images_root,
         task=task,
         split="val",
-        image_col=cfg.data.image_col if "data" in cfg else "Image",
+        image_col=image_col,
         label_col=label_col,
-        image_size=int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size),
-        augmentation_cfg=cfg.augmentation if "augmentation" in cfg else {},
+        image_size=image_size,
+        augmentation_cfg=augmentation_cfg,
         sanity_mode=False,
     )
 
@@ -590,6 +593,27 @@ def train_one_run(cfg, args) -> None:
     )
     dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=(device.type == "cuda"))
 
+    dl_train_no_aug = None
+    if use_swa:
+        ds_train_no_aug = GardnerDataset(
+            csv_path=train_csv,
+            images_root=images_root,
+            task=task,
+            split="train",
+            image_col=image_col,
+            label_col=label_col,
+            image_size=image_size,
+            augmentation_cfg=augmentation_cfg,
+            sanity_mode=True,
+        )
+        dl_train_no_aug = DataLoader(
+            ds_train_no_aug,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=(device.type == "cuda"),
+        )
+
     # Print model summary
     print("\n" + "="*80)
     print("Model Summary")
@@ -668,6 +692,8 @@ def train_one_run(cfg, args) -> None:
     best_metric = -1.0
     best_path = out_dir / "best.ckpt"
     metrics_val_path = out_dir / "metrics_val.json"
+    global_step = 0
+    best_global_step = 0
 
     # Sanity overfit test (optional)
     if args.sanity_overfit:
@@ -837,6 +863,7 @@ def train_one_run(cfg, args) -> None:
             opt.step()
             if scheduler_active:
                 scheduler.step()  # Update LR after each batch
+            global_step += 1
             running += loss.item() * x.size(0)
             n += x.size(0)
 
@@ -853,12 +880,20 @@ def train_one_run(cfg, args) -> None:
         # save best
         if monitor > best_metric:
             best_metric = monitor
-            torch.save({"state_dict": model.state_dict(),
-                        "task": task, "track": track,
-                        "num_classes": num_classes,
-                        "label_col": label_col}, best_path)
+            best_global_step = global_step
+            torch.save({
+                "state_dict": model.state_dict(),
+                "task": task,
+                "track": track,
+                "num_classes": num_classes,
+                "label_col": label_col,
+                "epoch": epoch,
+                "global_step": best_global_step,
+                "is_swa": False,
+                "swa": False,
+            }, best_path)
             with open(metrics_val_path, "w", encoding="utf-8") as f:
-                json.dump({"best_epoch": epoch, "best_val": val_metrics}, f, indent=2)
+                json.dump({"best_epoch": epoch, "best_global_step": best_global_step, "best_val": val_metrics}, f, indent=2)
             print(f"  ✓ Saved best to {best_path} (monitor={best_metric:.4f})")
         if use_swa and epoch >= swa_start_epoch:
             swa_model.update_parameters(model)
@@ -866,40 +901,82 @@ def train_one_run(cfg, args) -> None:
 
     # SWA finalization / CORAL tuning
     swa_ckpt_path = out_dir / "best_swa.ckpt"
-    threshold_json_path = out_dir / "best_coral_threshold.json"
+    threshold_best_path = out_dir / "best_threshold_bestckpt.json"
+    threshold_swa_path = out_dir / "best_threshold_swa.json"
     swa_val_metrics = None
-    eval_model = swa_model if use_swa else model
 
     if use_swa:
-        print("[SWA] Updating BatchNorm statistics for averaged weights...")
-        update_bn(dl_train, swa_model, device=device)
+        bn_loader = dl_train_no_aug if dl_train_no_aug is not None else dl_train
+        print("[SWA] Updating BatchNorm statistics for averaged weights using deterministic train_no_aug loader...")
+        update_bn(bn_loader, swa_model, device=device)
         torch.save({
             "state_dict": swa_model.state_dict(),
             "task": task,
             "track": track,
             "num_classes": num_classes,
             "label_col": label_col,
+            "epoch": epochs,
+            "global_step": global_step,
+            "is_swa": True,
             "swa": True
         }, swa_ckpt_path)
         print(f"[SWA] Saved averaged checkpoint to {swa_ckpt_path}")
         swa_val_metrics = evaluate_on_val(swa_model, dl_val, device, use_coral, verbose=True, task=task)
         print(f"[SWA VAL] acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}")
 
-    threshold_result = None
+    def _write_threshold_file(result: Dict, path: Path, ckpt_path: Path, is_swa_ckpt: bool, epoch_value: Optional[int], step_value: Optional[int]) -> None:
+        payload = {
+            "checkpoint": str(ckpt_path),
+            "is_swa": is_swa_ckpt,
+            "epoch": epoch_value,
+            "global_step": step_value,
+            "best_coral_thr": result["best_thr"],
+            "metric": {
+                "val_f1_weighted": result["best_f1"],
+                "val_acc": result["best_acc"],
+            },
+            "grid": result["grid"],
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        label = "SWA" if is_swa_ckpt else "best"
+        print(f"[CORAL TUNING] Saved tuned threshold for {label} checkpoint to {path}")
+
+    best_threshold_result: Optional[Dict] = None
+    swa_threshold_result: Optional[Dict] = None
     if use_coral and tune_coral_thr:
-        threshold_result = tune_coral_threshold(eval_model, dl_val, device, thr_min, thr_max, thr_step, num_classes)
-        if threshold_result:
-            threshold_payload = {
-                "best_coral_thr": threshold_result["best_thr"],
-                "metric": {
-                    "val_f1_weighted": threshold_result["best_f1"],
-                    "val_acc": threshold_result["best_acc"],
-                },
-                "grid": threshold_result["grid"],
-            }
-            with open(threshold_json_path, "w", encoding="utf-8") as f:
-                json.dump(threshold_payload, f, indent=2)
-            print(f"[CORAL TUNING] Saved tuned threshold to {threshold_json_path}")
+        print("[CORAL TUNING] Running threshold search for best checkpoint")
+        if best_path.exists():
+            best_eval_model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=float(cfg.model.dropout), task=task, use_coral=use_coral)
+            best_eval_model.to(device)
+            best_ckpt = torch.load(best_path, map_location=device)
+            best_state = best_ckpt.get("state_dict", best_ckpt)
+            best_eval_model.load_state_dict(best_state)
+            best_threshold_result = tune_coral_threshold(best_eval_model, dl_val, device, thr_min, thr_max, thr_step, num_classes)
+            if best_threshold_result:
+                _write_threshold_file(
+                    best_threshold_result,
+                    threshold_best_path,
+                    best_path,
+                    False,
+                    best_ckpt.get("epoch"),
+                    best_ckpt.get("global_step"),
+                )
+        else:
+            print(f"[CORAL TUNING] Best checkpoint missing ({best_path}); skipping threshold search.")
+
+        if use_swa and swa_model is not None:
+            print("[CORAL TUNING] Running threshold search for SWA checkpoint")
+            swa_threshold_result = tune_coral_threshold(swa_model, dl_val, device, thr_min, thr_max, thr_step, num_classes)
+            if swa_threshold_result:
+                _write_threshold_file(
+                    swa_threshold_result,
+                    threshold_swa_path,
+                    swa_ckpt_path,
+                    True,
+                    epochs,
+                    global_step,
+                )
 
     # Write debug report
     debug_report_path = out_dir / "debug_report.txt"
@@ -918,9 +995,12 @@ def train_one_run(cfg, args) -> None:
         if swa_val_metrics is not None:
             f.write(f"SWA val metrics: acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}\n")
             f.write(f"SWA confusion matrix:\n{np.array(swa_val_metrics.get('confusion_matrix', []))}\n")
-        if threshold_result is not None:
-            f.write(f"Best tuned coral threshold: {threshold_result['best_thr']:.4f}\n")
-            f.write(f"Threshold f1/acc: {threshold_result['best_f1']:.4f}/{threshold_result['best_acc']:.4f}\n")
+        if best_threshold_result is not None:
+            f.write(f"Best checkpoint CORAL threshold: {best_threshold_result['best_thr']:.4f} (saved to {threshold_best_path})\n")
+            f.write(f"  val_f1_weighted={best_threshold_result['best_f1']:.4f} | val_acc={best_threshold_result['best_acc']:.4f}\n")
+        if swa_threshold_result is not None:
+            f.write(f"SWA checkpoint CORAL threshold: {swa_threshold_result['best_thr']:.4f} (saved to {threshold_swa_path})\n")
+            f.write(f"  val_f1_weighted={swa_threshold_result['best_f1']:.4f} | val_acc={swa_threshold_result['best_acc']:.4f}\n")
 
         # Check for majority-class collapse
         max_ratio = max(val_metrics['y_pred_ratios'].values()) if val_metrics['y_pred_ratios'] else 0

@@ -40,9 +40,19 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-def load_state_dict_robust(ckpt_path: str, device: torch.device) -> dict:
+def load_state_dict_robust(ckpt_path: str, device: torch.device) -> Tuple[dict, dict]:
     ckpt = torch.load(ckpt_path, map_location=device)
-    state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+    metadata = {}
+    if isinstance(ckpt, dict):
+        metadata = {k: v for k, v in ckpt.items() if k not in {"state_dict", "model_state_dict"}}
+        if "state_dict" in ckpt:
+            state = ckpt["state_dict"]
+        elif "model_state_dict" in ckpt:
+            state = ckpt["model_state_dict"]
+        else:
+            state = {k: v for k, v in ckpt.items()}
+    else:
+        state = ckpt
 
     new_state = {}
     for k, v in state.items():
@@ -55,7 +65,7 @@ def load_state_dict_robust(ckpt_path: str, device: torch.device) -> dict:
     if "n_averaged" in new_state:
         new_state.pop("n_averaged", None)
         print("[SWA] Dropped 'n_averaged' key from checkpoint before loading.")
-    return new_state
+    return new_state, metadata
 
 
 def normalize_labels_in_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -133,31 +143,49 @@ def extract_predicted_exp_series(preds_df: pd.DataFrame) -> Optional[pd.Series]:
 DEFAULT_CORAL_THR = 0.5
 
 
-def find_automatic_coral_threshold(checkpoint: Path, out_dir: Path) -> Optional[float]:
+def find_automatic_coral_threshold(
+    checkpoint: Path,
+    out_dir: Path,
+    is_swa_checkpoint: Optional[bool],
+) -> Optional[float]:
+    names = []
+    if is_swa_checkpoint is True:
+        names.append("best_threshold_swa.json")
+    elif is_swa_checkpoint is False:
+        names.append("best_threshold_bestckpt.json")
+    else:
+        names.extend(["best_threshold_bestckpt.json", "best_threshold_swa.json"])
+    names.append("best_coral_threshold.json")
+
     candidates = []
     if checkpoint:
         candidates.append(checkpoint.parent)
     if out_dir:
         candidates.append(out_dir)
-    seen = set()
+    seen_roots = set()
+    seen_paths = set()
     for root in candidates:
-        if root in seen or not root:
+        if root in seen_roots or not root:
             continue
-        seen.add(root)
-        thr_path = root / "best_coral_threshold.json"
-        if not thr_path.exists():
-            continue
-        try:
-            with thr_path.open("r", encoding="utf-8") as f:
-                payload = json.load(f)
-            thr_value = payload.get("best_coral_thr")
-            if thr_value is None:
+        seen_roots.add(root)
+        for name in names:
+            thr_path = root / name
+            if thr_path in seen_paths:
                 continue
-            thr_value = float(thr_value)
-            print(f"[AUTO CORAL] Loaded tuned threshold {thr_value:.4f} from {thr_path}")
-            return thr_value
-        except Exception as exc:
-            print(f"[AUTO CORAL] Failed to read {thr_path}: {exc}")
+            seen_paths.add(thr_path)
+            if not thr_path.exists():
+                continue
+            try:
+                with thr_path.open("r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                thr_value = payload.get("best_coral_thr")
+                if thr_value is None:
+                    continue
+                thr_value = float(thr_value)
+                print(f"[AUTO CORAL] Loaded tuned threshold {thr_value:.4f} from {thr_path}")
+                return thr_value
+            except Exception as exc:
+                print(f"[AUTO CORAL] Failed to read {thr_path}: {exc}")
     return None
 
 
@@ -215,7 +243,14 @@ def main():
 
     # CORAL auto-detect for EXP
     use_coral_flag = bool(args.use_coral)
-    state_dict = load_state_dict_robust(args.checkpoint, device)
+    state_dict, ckpt_meta = load_state_dict_robust(args.checkpoint, device)
+    ckpt_epoch = ckpt_meta.get("epoch")
+    ckpt_global_step = ckpt_meta.get("global_step")
+    is_swa_ckpt = bool(ckpt_meta.get("is_swa", ckpt_meta.get("swa", False)))
+    print(
+        f"[EVAL] checkpoint={args.checkpoint} | epoch={ckpt_epoch} | "
+        f"global_step={ckpt_global_step} | is_swa={is_swa_ckpt}"
+    )
     if "head.4.weight" in state_dict:
         out_dim = state_dict["head.4.weight"].shape[0]
         inferred_coral = (out_dim == train_num_classes - 1)
@@ -227,7 +262,9 @@ def main():
     coral_thr_value = args.coral_thr if user_provided_thr else DEFAULT_CORAL_THR
     auto_thr_enabled = bool(args.auto_thr)
     if use_coral_flag and auto_thr_enabled and not user_provided_thr:
-        auto_thr = find_automatic_coral_threshold(Path(args.checkpoint), Path(args.out_dir))
+        auto_thr = find_automatic_coral_threshold(
+            Path(args.checkpoint), Path(args.out_dir), is_swa_ckpt
+        )
         if auto_thr is not None:
             coral_thr_value = auto_thr
         else:
@@ -456,6 +493,10 @@ def main():
         "confusion_matrix": cm.tolist(),
         "y_pred_distribution": {"counts": counts_full, "ratios": ratios_full},
     }
+    out["checkpoint_epoch"] = ckpt_epoch
+    out["checkpoint_global_step"] = ckpt_global_step
+    out["checkpoint_is_swa"] = is_swa_ckpt
+    out["checkpoint_metadata"] = ckpt_meta
     if use_coral_flag:
         out["coral_thresholds"] = coral_thresholds
 
