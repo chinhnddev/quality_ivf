@@ -450,6 +450,8 @@ def train_one_run(cfg, args) -> None:
     use_weighted_sampler = bool(args.use_weighted_sampler)
     use_coral = bool(args.use_coral) and task in ORDINAL_TASKS
     label_smoothing_cfg = float(getattr(cfg.loss, "label_smoothing", 0.0)) if hasattr(cfg, "loss") else 0.0
+    swa_cfg = getattr(cfg, "swa", OmegaConf.create({}))
+    use_swa = bool(getattr(swa_cfg, "use", False))
 
     loss_name = "CORAL_BCEWithLogits" if use_coral else ("CrossEntropyLoss" if task == "exp" else "FocalLoss")
     applied_smoothing = 0.0
