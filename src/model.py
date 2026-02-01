@@ -181,7 +181,7 @@ class IVF_EffiMorphPP(nn.Module):
         self,
         num_classes: int,
         dropout_p: float = 0.3,
-        width_mult: float = 1.2,
+        width_mult: float = 1.0,
         base_channels: int = 32,
         divisor: int = 8,
         task: str = "exp",
@@ -249,11 +249,8 @@ class IVF_EffiMorphPP(nn.Module):
         s3 = self.stage3(s2)
         s4 = self.stage4(s3)
 
-        target_size = s4.shape[2:]
-        s2_up = F.interpolate(s2, size=target_size, mode="bilinear", align_corners=False)
-        s3_up = F.interpolate(s3, size=target_size, mode="bilinear", align_corners=False)
+        fused = torch.cat([s2, s3, s4], dim=1)
 
-        fused = torch.cat([s2_up, s3_up, s4], dim=1)
         fused = self.fusion(fused)
         fused = self.eca(fused)
 
