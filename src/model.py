@@ -181,7 +181,7 @@ class IVF_EffiMorphPP(nn.Module):
         self,
         num_classes: int,
         dropout_p: float = 0.3,
-        width_mult: float = 1.5,
+        width_mult: float = 1.0,
         base_channels: int = 32,
         divisor: int = 8,
         task: str = "exp",
