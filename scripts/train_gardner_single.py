@@ -904,14 +904,18 @@ def train_one_run(cfg, args) -> None:
     if use_swa:
         print("[SWA] Updating BatchNorm statistics for averaged weights...")
         update_bn(dl_train, swa_model, device=device)
-        torch.save({
-            "state_dict": swa_model.state_dict(),
-            "task": task,
-            "track": track,
-            "num_classes": num_classes,
-            "label_col": label_col,
-            "swa": True
-        }, swa_ckpt_path)
+        swa_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            torch.save({
+                "state_dict": swa_model.state_dict(),
+                "task": task,
+                "track": track,
+                "num_classes": num_classes,
+                "label_col": label_col,
+                "swa": True
+            }, swa_ckpt_path)
+        except OSError as exc:
+            raise RuntimeError(f"Failed to save SWA checkpoint to {swa_ckpt_path}: {exc}") from exc
         print(f"[SWA] Saved averaged checkpoint to {swa_ckpt_path}")
         swa_val_metrics = evaluate_on_val(swa_model, dl_val, device, use_coral, verbose=True, task=task)
         print(f"[SWA VAL] acc={swa_val_metrics['acc']:.4f} macro_f1={swa_val_metrics['macro_f1']:.4f} weighted_f1={swa_val_metrics['weighted_f1']:.4f}")
