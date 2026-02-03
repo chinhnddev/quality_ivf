@@ -134,20 +134,34 @@ class DWConvBlock(nn.Module):
 class MorphologyBranch(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        # Simple edge/morphology extractor (Sobel-like conv for cavity boundaries)
         self.edge_conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels // 2, 3, padding=1, bias=False),  # Detect edges
+            nn.Conv2d(in_channels, out_channels // 2, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels // 2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels // 2, out_channels // 2, 3, padding=2, dilation=2, bias=False),  # Expand for morphology
+            nn.Conv2d(out_channels // 2, out_channels // 2, 3, padding=2, dilation=2, bias=False),
             nn.BatchNorm2d(out_channels // 2),
             nn.ReLU(inplace=True),
         )
         self.cbam = CBAM(out_channels // 2)
+        self.downsample = nn.Sequential(
+            nn.Conv2d(out_channels // 2, out_channels // 2, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels // 2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels // 2, out_channels // 2, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels // 2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels // 2, out_channels // 2, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels // 2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels // 2, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
 
     def forward(self, x):
         x = self.edge_conv(x)
-        return self.cbam(x)
+        x = self.cbam(x)
+        return self.downsample(x)
 
 # -------------------------
 # ASPP Light (NEW for multi-scale RF in fusion)
