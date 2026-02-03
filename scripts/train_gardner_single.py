@@ -31,7 +31,7 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import CORAL functions
-from src.loss_coral import coral_loss, coral_predict_class
+from src.loss_coral import LabelSmoothingCoralLoss, coral_predict_class
 from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_distribution
 
 
@@ -116,9 +116,6 @@ def make_loss_fn(
     use_coral: bool = False,
     label_smoothing: float = 0.0,
 ) -> nn.Module:
-    if use_coral and task in ORDINAL_TASKS:
-        # CORAL loss for ordinal regression
-        return lambda logits, targets: coral_loss(logits, targets, num_classes)
     weights = None
     if use_class_weights:
         weights = compute_class_weights(train_labels, num_classes)
@@ -130,6 +127,9 @@ def make_loss_fn(
             print(f"[OK] Class weights computed for task={task}:")
             for i, w in enumerate(weights.tolist()):
                 print(f"  Class {i}: weight={w:.4f}")
+    if use_coral and task in ORDINAL_TASKS:
+        return LabelSmoothingCoralLoss(alpha=weights, smoothing=0.1)
+
     if track == "benchmark_fair":
         smoothing = 0.0 if use_weighted_sampler or sanity_mode else 0.0
         return nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
@@ -539,20 +539,45 @@ def train_one_run(cfg, args) -> None:
         )
 
     # In sanity_overfit mode, disable dropout for true overfit test
-    dropout_p_value = 0.0 if args.sanity_overfit else float(cfg.model.dropout)
+    dropout_cfg = float(getattr(cfg.model, "dropout", 0.5))
+    dropout_p_value = 0.0 if args.sanity_overfit else dropout_cfg
 
     # Sanity model scale preset
     if args.sanity_overfit:
         scale_mapping = {"small": 1.0, "base": 1.25, "large": 1.5}
         width_mult = scale_mapping[args.sanity_model_scale]
         # Auto-bump to 2.0 if params < 3M
-        temp_model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral)
+        temp_model = IVF_EffiMorphPP(
+            num_classes=num_classes,
+            dropout_p=dropout_p_value,
+            width_mult=width_mult,
+            task=task,
+            use_coral=use_coral,
+            use_aux=True,
+            use_stage_dropout=True,
+        )
         total_params = sum(p.numel() for p in temp_model.parameters())
         if total_params < 3_000_000 and args.sanity_model_scale == "large":
             width_mult = 2.0
-        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral)
+        model = IVF_EffiMorphPP(
+            num_classes=num_classes,
+            dropout_p=dropout_p_value,
+            width_mult=width_mult,
+            task=task,
+            use_coral=use_coral,
+            use_aux=True,
+            use_stage_dropout=True,
+        )
     else:
-        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, task=task, use_coral=use_coral)
+        model = IVF_EffiMorphPP(
+            num_classes=num_classes,
+            dropout_p=dropout_p_value,
+            width_mult=1.0,
+            task=task,
+            use_coral=use_coral,
+            use_aux=True,
+            use_stage_dropout=True,
+        )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
@@ -831,8 +856,14 @@ def train_one_run(cfg, args) -> None:
             x = x.to(device)
             y = y.to(device)
             opt.zero_grad(set_to_none=True)
-            logits = model(x)
-            loss = loss_fn(logits, y)
+            outputs = model(x, return_aux=True)
+            if isinstance(outputs, tuple):
+                main_out, aux_out = outputs
+                loss_main = loss_fn(main_out, y)
+                loss_aux = loss_fn(aux_out, y)
+                loss = loss_main + 0.4 * loss_aux
+            else:
+                loss = loss_fn(outputs, y)
             loss.backward()
             opt.step()
             if scheduler_active:

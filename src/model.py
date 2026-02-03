@@ -180,16 +180,20 @@ class IVF_EffiMorphPP(nn.Module):
     def __init__(
         self,
         num_classes: int,
-        dropout_p: float = 0.3,
+        dropout_p: float = 0.5,
         width_mult: float = 1.0,
         base_channels: int = 32,
         divisor: int = 8,
         task: str = "exp",
         use_coral: bool = False,
+        use_aux: bool = True,
+        use_stage_dropout: bool = True,
     ):
         super().__init__()
         self.task = task
         self.use_coral = use_coral
+        self.use_aux = use_aux
+        self.use_stage_dropout = use_stage_dropout
 
         def make_divisible(v: float, d: int = 8) -> int:
             return int((v + d / 2) // d * d)
@@ -218,6 +222,11 @@ class IVF_EffiMorphPP(nn.Module):
         self.stage3 = DWConvBlock(c2, c3, stride=1, dilation=2)
         self.stage4 = DWConvBlock(c3, c4, stride=1, dilation=4)
 
+        if use_stage_dropout:
+            self.dropout_s2 = nn.Dropout2d(p=0.05)
+            self.dropout_s3 = nn.Dropout2d(p=0.10)
+            self.dropout_s4 = nn.Dropout2d(p=0.15)
+
         self.fusion = nn.Sequential(
             nn.Conv2d(c2 + c3 + c4, c4, 1, bias=False),
             nn.BatchNorm2d(c4),
@@ -236,11 +245,19 @@ class IVF_EffiMorphPP(nn.Module):
             nn.Linear(c4, hidden),
             nn.LayerNorm(hidden),
             nn.ReLU(inplace=True),
-            nn.Dropout(dropout_p * 0.5),
+            nn.Dropout(dropout_p * 0.7),
             nn.Linear(hidden, output_dim),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if use_aux:
+            self.aux_head = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Dropout(dropout_p * 0.4),
+                nn.Linear(c3, output_dim),
+            )
+
+    def forward(self, x: torch.Tensor, return_aux: bool = False) -> torch.Tensor:
         x = self.stem(x)
         x = self.stage1(x)
         x = self.stage1_down(x)
@@ -249,6 +266,15 @@ class IVF_EffiMorphPP(nn.Module):
         s3 = self.stage3(s2)
         s4 = self.stage4(s3)
 
+        aux_out = None
+        if return_aux and self.use_aux and self.training:
+            aux_out = self.aux_head(s3)
+
+        if self.use_stage_dropout and self.training:
+            s2 = self.dropout_s2(s2)
+            s3 = self.dropout_s3(s3)
+            s4 = self.dropout_s4(s4)
+
         fused = torch.cat([s2, s3, s4], dim=1)
 
         fused = self.fusion(fused)
@@ -256,4 +282,7 @@ class IVF_EffiMorphPP(nn.Module):
 
         x = self.gap(fused).flatten(1)
         x = self.dropout(x)
-        return self.head(x)
+        main_out = self.head(x)
+        if return_aux and self.use_aux and self.training:
+            return main_out, aux_out
+        return main_out
