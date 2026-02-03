@@ -177,8 +177,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_strict", action="store_true")
     parser.add_argument("--use_coral", type=int, default=0)
-    parser.add_argument("--coral_thr", type=float, default=None,
-                        help=f"Uniform CORAL threshold for EXP (default {DEFAULT_CORAL_THR}).")
+    parser.add_argument("--coral_thr", "--coral_threshold", dest="coral_thr", type=float, default=None,
+                        help=f"Uniform CORAL threshold for EXP (default {DEFAULT_CORAL_THR}). "
+                             f"(alias --coral_threshold retained for scripts expecting the old flag)")
     parser.add_argument("--auto_thr", type=int, choices=[0, 1], default=1,
                         help="Automatically load tuned CORAL threshold when --coral_thr is not provided.")
     parser.add_argument("--authors_filter_exp01_for_icm_te", type=int, choices=[0, 1], default=1,
