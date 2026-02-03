@@ -166,12 +166,17 @@ class MorphologyBranch(nn.Module):
 class ASPPLight(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
+        base = out_channels // 3
+        remainder = out_channels % 3
+        ch_list = [base] * 3
+        for i in range(remainder):
+            ch_list[i] += 1
         self.branches = nn.ModuleList([
-            nn.Conv2d(in_channels, out_channels // 3, 1, bias=False),  # 1x1
-            nn.Conv2d(in_channels, out_channels // 3, 3, padding=3, dilation=3, bias=False),  # Dilation 3
-            nn.Conv2d(in_channels, out_channels // 3, 3, padding=6, dilation=6, bias=False),  # Dilation 6
+            nn.Conv2d(in_channels, ch_list[0], 1, bias=False),  # 1x1
+            nn.Conv2d(in_channels, ch_list[1], 3, padding=3, dilation=3, bias=False),  # Dilation 3
+            nn.Conv2d(in_channels, ch_list[2], 3, padding=6, dilation=6, bias=False),  # Dilation 6
         ])
-        self.proj = nn.Conv2d(out_channels, out_channels, 1, bias=False)
+        self.proj = nn.Conv2d(sum(ch_list), out_channels, 1, bias=False)
 
     def forward(self, x):
         feats = [F.relu(branch(x)) for branch in self.branches]
