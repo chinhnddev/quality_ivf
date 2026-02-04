@@ -430,8 +430,6 @@ def train_one_run(cfg, args) -> None:
     # Determine label_col and num_classes from task config
     label_col = cfg.label_col
     num_classes = int(cfg.num_classes)
-    use_aux = bool(getattr(cfg, "use_aux", False))
-    aux_weight = float(getattr(cfg, "aux_weight", 0.25)) if use_aux else 0.0
 
     # Load raw dfs for sanity check prints (not filtered)
     raw_train_df = pd.read_csv(train_csv)
@@ -548,13 +546,13 @@ def train_one_run(cfg, args) -> None:
         scale_mapping = {"small": 1.0, "base": 1.25, "large": 1.5}
         width_mult = scale_mapping[args.sanity_model_scale]
         # Auto-bump to 2.0 if params < 3M
-        temp_model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral, use_aux=use_aux)
+        temp_model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral)
         total_params = sum(p.numel() for p in temp_model.parameters())
         if total_params < 3_000_000 and args.sanity_model_scale == "large":
             width_mult = 2.0
-        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral, use_aux=use_aux)
+        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral)
     else:
-        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, task=task, use_coral=use_coral, use_aux=use_aux)
+        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, task=task, use_coral=use_coral)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
@@ -591,9 +589,6 @@ def train_one_run(cfg, args) -> None:
         pin_memory=(device.type == "cuda"),
     )
     dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=(device.type == "cuda"))
-
-    if use_aux:
-        print(f"[AUX HEAD] enabled (weight={aux_weight:.2f})")
 
     # Print model summary
     print("\n" + "="*80)
@@ -787,7 +782,7 @@ def train_one_run(cfg, args) -> None:
         
         # Reset model to fresh weights for actual training
         from src.model import IVF_EffiMorphPP
-        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=float(cfg.model.dropout), use_aux=use_aux)
+        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=float(cfg.model.dropout))
         model.to(device)
         # Reinit optimizer with new model
         lr = float(cfg.optimizer.lr)
@@ -836,14 +831,8 @@ def train_one_run(cfg, args) -> None:
             x = x.to(device)
             y = y.to(device)
             opt.zero_grad(set_to_none=True)
-            if use_aux and getattr(model, "use_aux", False):
-                main_out, aux_out = model(x, return_aux=True)
-                loss_main = loss_fn(main_out, y)
-                loss_aux = loss_fn(aux_out, y)
-                loss = loss_main + (aux_weight * loss_aux)
-            else:
-                logits = model(x)
-                loss = loss_fn(logits, y)
+            logits = model(x)
+            loss = loss_fn(logits, y)
             loss.backward()
             opt.step()
             if scheduler_active:
