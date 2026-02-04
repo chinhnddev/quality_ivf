@@ -21,6 +21,7 @@ class SimAM(nn.Module):
         n = h * w - 1
         mu = x.mean(dim=[2, 3], keepdim=True)
         var = (x - mu).pow(2)
+        # epsilon 1e-6 để tránh numerical instability
         y = var / (4 * (var.sum(dim=[2, 3], keepdim=True) / n + 1e-6)) + 0.5
         return x * self.activation(y)
 
@@ -44,48 +45,47 @@ class ECA(nn.Module):
 
     @staticmethod
     def _get_adaptive_kernel_size(channels: int, gamma: int = 2, b: int = 1) -> int:
+        """
+        Adaptive kernel size theo ECA paper
+        k = |log2(C) / γ + b / γ|_odd
+        """
         t = int(abs((math.log2(channels) / gamma) + (b / gamma)))
-        k = t if t % 2 else t + 1
+        k = t if t % 2 else t + 1  # đảm bảo lẻ
         return max(3, k)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, 1, c)
-        y = self.conv(y).view(b, c, 1, 1)
+        y = self.avg_pool(x).view(b, 1, c)   # B,1,C
+        y = self.conv(y).view(b, c, 1, 1)   # B,C,1,1
         return x * self.sigmoid(y)
 
 
 # -------------------------
-# Multi-scale block (UPDATED)
+# Multi-scale block
 # -------------------------
 class MultiScaleBlock(nn.Module):
     """
-    Multi-scale convolution block (cheaper & less overfit)
-    - branch1: 3x3 (dilation=1)
-    - branch2: 3x3 (dilation=2) ~ receptive field like 5x5
-    - branch3: 3x3 (dilation=3) ~ receptive field like 7x7
+    Multi-scale convolution block với 3 branches (3x3, 5x5, 7x7)
     """
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         c = out_channels // 3
-        c3 = out_channels - 2 * c
 
-        def conv3x3_bn_relu(in_c: int, out_c: int, dilation: int):
-            return nn.Sequential(
-                nn.Conv2d(
-                    in_c, out_c,
-                    kernel_size=3,
-                    padding=dilation,
-                    dilation=dilation,
-                    bias=False
-                ),
-                nn.BatchNorm2d(out_c),
-                nn.ReLU(inplace=True),
-            )
-
-        self.branch1 = conv3x3_bn_relu(in_channels, c, dilation=1)
-        self.branch2 = conv3x3_bn_relu(in_channels, c, dilation=2)
-        self.branch3 = conv3x3_bn_relu(in_channels, c3, dilation=3)
+        self.branch1 = nn.Sequential(
+            nn.Conv2d(in_channels, c, 3, padding=1, bias=False),
+            nn.BatchNorm2d(c),
+            nn.ReLU(inplace=True),
+        )
+        self.branch2 = nn.Sequential(
+            nn.Conv2d(in_channels, c, 5, padding=2, bias=False),
+            nn.BatchNorm2d(c),
+            nn.ReLU(inplace=True),
+        )
+        self.branch3 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels - 2 * c, 7, padding=3, bias=False),
+            nn.BatchNorm2d(out_channels - 2 * c),
+            nn.ReLU(inplace=True),
+        )
 
         self.proj = nn.Sequential(
             nn.Conv2d(out_channels, out_channels, 1, bias=False),
@@ -110,8 +110,10 @@ class MultiScaleBlock(nn.Module):
         x = self.simam(x)
 
         if self.use_res:
-            return x + identity
-        return x + self.skip(identity)
+            x = x + identity
+        else:
+            x = x + self.skip(identity)
+        return x
 
 
 # -------------------------
@@ -147,13 +149,16 @@ class DWConvBlock(nn.Module):
         )
 
         self.simam = SimAM(out_channels)
+
         self.use_res = stride == 1 and in_channels == out_channels
 
     def forward(self, x):
         identity = x
+
         x = self.dw(x)
         x = self.pw(x)
         x = self.simam(x)
+
         if self.use_res:
             x = x + identity
         return x
@@ -175,8 +180,15 @@ class GeM(nn.Module):
             (x.size(-2), x.size(-1))
         ).pow(1.0 / self.p)
     
-
 class IVF_EffiMorphPP(nn.Module):
+    """
+    IVF_EffiMorphPP (clean)
+    - Dynamic interpolation size (no hardcode 7x7)
+    - Residual projection for all DWConvBlocks
+    - Adaptive ECA kernel size
+    - CORAL optional (EXP -> K-1 logits)
+    """
+
     def __init__(
         self,
         num_classes: int,
@@ -200,24 +212,33 @@ class IVF_EffiMorphPP(nn.Module):
         c3 = make_divisible(8 * base, divisor)
         c4 = make_divisible(16 * base, divisor)
 
+        # Stem: /2
         self.stem = nn.Sequential(
             nn.Conv2d(3, base, 3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(base),
             nn.ReLU(inplace=True),
         )
 
+        # Stage 1 (no downsample)
         self.stage1 = MultiScaleBlock(base, c1)
 
+        # /2
         self.stage1_down = nn.Sequential(
             nn.Conv2d(c1, c1, 3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(c1),
             nn.ReLU(inplace=True),
         )
 
+        # /2
         self.stage2 = DWConvBlock(c1, c2, stride=2, dilation=1)
+
+        # /2  (dilation configurable)
         self.stage3 = DWConvBlock(c2, c3, stride=1, dilation=2)
+
+        # /2
         self.stage4 = DWConvBlock(c3, c4, stride=1, dilation=4)
 
+        # Fusion: concat(s2,s3,s4)->c4
         self.fusion = nn.Sequential(
             nn.Conv2d(c2 + c3 + c4, c4, 1, bias=False),
             nn.BatchNorm2d(c4),
@@ -229,11 +250,9 @@ class IVF_EffiMorphPP(nn.Module):
         self.gap = GeM(p=3.0, eps=1e-6)
         self.dropout = nn.Dropout(dropout_p)
 
-        if use_coral and num_classes < 2:
-            raise ValueError("CORAL requires at least 2 classes.")
-        output_dim = num_classes - 1 if use_coral else num_classes
+        output_dim = num_classes - 1 if (task == "exp" and use_coral) else num_classes
         self.head = nn.Sequential(
-            nn.Linear(c4, hidden),
+            nn.Linear(c4, hidden), 
             nn.LayerNorm(hidden),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout_p * 0.5),
@@ -249,8 +268,11 @@ class IVF_EffiMorphPP(nn.Module):
         s3 = self.stage3(s2)
         s4 = self.stage4(s3)
 
-        fused = torch.cat([s2, s3, s4], dim=1)
+        target_size = s4.shape[2:]
+        s2_up = F.interpolate(s2, size=target_size, mode="bilinear", align_corners=False)
+        s3_up = F.interpolate(s3, size=target_size, mode="bilinear", align_corners=False)
 
+        fused = torch.cat([s2_up, s3_up, s4], dim=1)
         fused = self.fusion(fused)
         fused = self.eca(fused)
 
