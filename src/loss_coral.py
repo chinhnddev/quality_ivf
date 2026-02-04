@@ -6,7 +6,6 @@ Used for EXP task ordinal classification (0,1,2,3,4).
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 def coral_encode_targets(y: torch.Tensor, num_classes: int) -> torch.Tensor:
@@ -96,29 +95,6 @@ def coral_predict_class(logits: torch.Tensor, thresholds = 0.5) -> torch.Tensor:
     y_pred = exceeds.sum(dim=1).long()
 
     return y_pred
-
-
-class LabelSmoothingCoralLoss(nn.Module):
-    def __init__(self, alpha: Optional[torch.Tensor] = None, smoothing: float = 0.1):
-        super().__init__()
-        if alpha is not None:
-            self.register_buffer("alpha", alpha)
-        else:
-            self.alpha = None
-        self.smoothing = float(smoothing)
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        batch_size = logits.size(0)
-        num_logits = logits.size(1)
-        levels = torch.arange(num_logits, device=logits.device).unsqueeze(0).expand(batch_size, -1)
-        targets_expanded = targets.unsqueeze(1).expand(-1, num_logits)
-        cum_labels = (levels < targets_expanded).float()
-        cum_labels = cum_labels * (1 - self.smoothing) + 0.5 * self.smoothing
-        loss = F.binary_cross_entropy_with_logits(logits, cum_labels, reduction="none")
-        if self.alpha is not None:
-            weights = self.alpha[targets].unsqueeze(1)
-            loss = loss * weights
-        return loss.mean()
 
 
 def coral_loss_masked(logits: torch.Tensor, y: torch.Tensor, num_classes: int, ignore_index: int = -1) -> torch.Tensor:
