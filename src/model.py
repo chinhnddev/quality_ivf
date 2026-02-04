@@ -1,21 +1,17 @@
-"""
-MINIMAL CHANGE: Add auxiliary head to your 83% baseline
-Keep EVERYTHING else identical
-[FIXED VERSION]
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 
 
-# ═══════════════════════════════════════════════════════════════
-# ATTENTION BLOCKS (UNCHANGED)
-# ═══════════════════════════════════════════════════════════════
-
+# -------------------------
+# Attention blocks
+# -------------------------
 class SimAM(nn.Module):
-    """Simple Attention Module"""
+    """
+    Simple Attention Module
+    Paper: https://arxiv.org/abs/2106.03105
+    """
     def __init__(self, channels: int):
         super().__init__()
         self.activation = nn.Sigmoid()
@@ -30,7 +26,10 @@ class SimAM(nn.Module):
 
 
 class ECA(nn.Module):
-    """Efficient Channel Attention"""
+    """
+    Efficient Channel Attention
+    Paper: https://arxiv.org/abs/1910.03151
+    """
     def __init__(self, channels: int, k_size: int | None = None):
         super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
@@ -56,12 +55,16 @@ class ECA(nn.Module):
         return x * self.sigmoid(y)
 
 
-# ═══════════════════════════════════════════════════════════════
-# BUILDING BLOCKS (UNCHANGED)
-# ═══════════════════════════════════════════════════════════════
-
+# -------------------------
+# Multi-scale block (UPDATED)
+# -------------------------
 class MultiScaleBlock(nn.Module):
-    """Multi-scale convolution block (dilation version)"""
+    """
+    Multi-scale convolution block (cheaper & less overfit)
+    - branch1: 3x3 (dilation=1)
+    - branch2: 3x3 (dilation=2) ~ receptive field like 5x5
+    - branch3: 3x3 (dilation=3) ~ receptive field like 7x7
+    """
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         c = out_channels // 3
@@ -101,25 +104,37 @@ class MultiScaleBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
+
         x = torch.cat([self.branch1(x), self.branch2(x), self.branch3(x)], dim=1)
         x = self.proj(x)
         x = self.simam(x)
+
         if self.use_res:
             return x + identity
         return x + self.skip(identity)
 
 
+# -------------------------
+# Depthwise block with residual
+# -------------------------
 class DWConvBlock(nn.Module):
-    """Depthwise Separable Convolution"""
+    """
+    Depthwise Separable Convolution với residual connection
+    Hỗ trợ stride=1/2, dilation>=1
+    """
     def __init__(self, in_channels, out_channels, stride=1, dilation=1):
         super().__init__()
 
         self.dw = nn.Sequential(
             nn.Conv2d(
-                in_channels, in_channels,
-                kernel_size=3, stride=stride,
-                padding=dilation, dilation=dilation,
-                groups=in_channels, bias=False,
+                in_channels,
+                in_channels,
+                kernel_size=3,
+                stride=stride,
+                padding=dilation,
+                dilation=dilation,
+                groups=in_channels,
+                bias=False,
             ),
             nn.BatchNorm2d(in_channels),
             nn.ReLU(inplace=True),
@@ -144,8 +159,11 @@ class DWConvBlock(nn.Module):
         return x
 
 
+# -------------------------
+# IVF_EffiMorphPP
+# -------------------------
 class GeM(nn.Module):
-    """Generalized Mean Pooling"""
+    """Generalized Mean Pooling - learnable pooling exponent"""
     def __init__(self, p: float = 3.0, eps: float = 1e-6):
         super().__init__()
         self.p = nn.Parameter(torch.ones(1) * p)
@@ -156,21 +174,9 @@ class GeM(nn.Module):
             x.clamp(min=self.eps).pow(self.p),
             (x.size(-2), x.size(-1))
         ).pow(1.0 / self.p)
-
-
-# ═══════════════════════════════════════════════════════════════
-# MODEL: BASELINE + AUXILIARY HEAD ONLY (FIXED!)
-# ═══════════════════════════════════════════════════════════════
+    
 
 class IVF_EffiMorphPP(nn.Module):
-    """
-    BASELINE + AUXILIARY HEAD
-    
-    CHANGES FROM 83% BASELINE:
-      ✓ Added auxiliary classifier at stage3
-      ✓ Fixed fusion interpolation
-      ✓ NOTHING ELSE changed!
-    """
     def __init__(
         self,
         num_classes: int,
@@ -180,12 +186,10 @@ class IVF_EffiMorphPP(nn.Module):
         divisor: int = 8,
         task: str = "exp",
         use_coral: bool = False,
-        use_aux: bool = True,
     ):
         super().__init__()
         self.task = task
         self.use_coral = use_coral
-        self.use_aux = use_aux
 
         def make_divisible(v: float, d: int = 8) -> int:
             return int((v + d / 2) // d * d)
@@ -196,15 +200,14 @@ class IVF_EffiMorphPP(nn.Module):
         c3 = make_divisible(8 * base, divisor)
         c4 = make_divisible(16 * base, divisor)
 
-        # Stem
         self.stem = nn.Sequential(
             nn.Conv2d(3, base, 3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(base),
             nn.ReLU(inplace=True),
         )
 
-        # Stages
         self.stage1 = MultiScaleBlock(base, c1)
+
         self.stage1_down = nn.Sequential(
             nn.Conv2d(c1, c1, 3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(c1),
@@ -215,7 +218,6 @@ class IVF_EffiMorphPP(nn.Module):
         self.stage3 = DWConvBlock(c2, c3, stride=1, dilation=2)
         self.stage4 = DWConvBlock(c3, c4, stride=1, dilation=4)
 
-        # Fusion
         self.fusion = nn.Sequential(
             nn.Conv2d(c2 + c3 + c4, c4, 1, bias=False),
             nn.BatchNorm2d(c4),
@@ -223,11 +225,12 @@ class IVF_EffiMorphPP(nn.Module):
         )
         self.eca = ECA(c4, k_size=None)
 
-        # Main Head
         hidden = max(128, c4 // 2)
         self.gap = GeM(p=3.0, eps=1e-6)
         self.dropout = nn.Dropout(dropout_p)
 
+        if use_coral and num_classes < 2:
+            raise ValueError("CORAL requires at least 2 classes.")
         output_dim = num_classes - 1 if use_coral else num_classes
         self.head = nn.Sequential(
             nn.Linear(c4, hidden),
@@ -237,23 +240,7 @@ class IVF_EffiMorphPP(nn.Module):
             nn.Linear(hidden, output_dim),
         )
 
-        # Auxiliary Head
-        if use_aux:
-            self.aux_head = nn.Sequential(
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Dropout(dropout_p * 0.3),
-                nn.Linear(c3, output_dim),
-            )
-
-    def forward(self, x: torch.Tensor, return_aux: bool = False):
-        """
-        Forward pass with optional auxiliary output
-        
-        Args:
-            x: Input [B, 3, H, W]
-            return_aux: If True and training, return (main_out, aux_out)
-        """
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
         x = self.stage1(x)
         x = self.stage1_down(x)
@@ -262,32 +249,11 @@ class IVF_EffiMorphPP(nn.Module):
         s3 = self.stage3(s2)
         s4 = self.stage4(s3)
 
-        # ════════════════════════════════════════════════════════
-        # Auxiliary output from stage3 (before fusion)
-        # ════════════════════════════════════════════════════════
-        if return_aux and self.use_aux and self.training:
-            aux_out = self.aux_head(s3)
+        fused = torch.cat([s2, s3, s4], dim=1)
 
-        # ════════════════════════════════════════════════════════
-        # FIXED: Interpolate before fusion
-        # ════════════════════════════════════════════════════════
-        target_size = s4.shape[2:]  # Get s4 spatial size [14, 14]
-        
-        # Upsample s2 and s3 to match s4
-        s2_up = F.interpolate(s2, size=target_size, mode='bilinear', align_corners=False)
-        s3_up = F.interpolate(s3, size=target_size, mode='bilinear', align_corners=False)
-        
-        # Concat (now all same size)
-        fused = torch.cat([s2_up, s3_up, s4], dim=1)
         fused = self.fusion(fused)
         fused = self.eca(fused)
 
-        # Main output
         x = self.gap(fused).flatten(1)
         x = self.dropout(x)
-        main_out = self.head(x)
-
-        # Return
-        if return_aux and self.use_aux and self.training:
-            return main_out, aux_out
-        return main_out
+        return self.head(x)
