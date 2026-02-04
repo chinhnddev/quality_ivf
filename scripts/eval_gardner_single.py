@@ -40,21 +40,10 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-# ═��══════════════════════════════════════════════════════════════════════
-# FIXED: Backward-compatible checkpoint loading
-# ════════════════════════════════════════════════════════════════════════
 def load_state_dict_robust(ckpt_path: str, device: torch.device) -> dict:
-    """
-    Load checkpoint with backward compatibility for:
-      - Wrapped state_dict
-      - SWA checkpoints (n_averaged)
-      - GeM parameter shape changes
-      - Module/model prefixes
-    """
     ckpt = torch.load(ckpt_path, map_location=device)
     state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
 
-    # Remove prefixes
     new_state = {}
     for k, v in state.items():
         k2 = k
@@ -63,139 +52,10 @@ def load_state_dict_robust(ckpt_path: str, device: torch.device) -> dict:
         if k2.startswith("module."):
             k2 = k2[len("module.") :]
         new_state[k2] = v
-    
-    # ══════════════════════════════════════════════════════��═════════════
-    # FIX 1: Remove SWA keys
-    # ════════════════════════════════════════════════════════════════════
     if "n_averaged" in new_state:
         new_state.pop("n_averaged", None)
         print("[SWA] Dropped 'n_averaged' key from checkpoint before loading.")
-    
-    # ════════════════════════════════════════════════════════════════════
-    # FIX 2: Handle GeM parameter shape mismatch (CRITICAL FIX)
-    # ════════════════════════════════════════════════════════════════════
-    # Note: We don't have the model yet, so we'll return the state_dict
-    # and handle compatibility in load_model_compatible() function
-    
     return new_state
-
-
-def load_model_compatible(
-    checkpoint_path: str,
-    num_classes: int,
-    task: str,
-    use_coral: bool,
-    device: torch.device,
-    strict: bool = True
-) -> torch.nn.Module:
-    """
-    Load model with full backward compatibility handling
-    
-    Handles:
-      - GeM parameter shape changes (scalar ↔ per-channel)
-      - Missing keys in old checkpoints
-      - Extra keys in new checkpoints
-    """
-    print(f"\n{'='*70}")
-    print(f"LOADING MODEL")
-    print(f"{'='*70}")
-    print(f"Checkpoint: {checkpoint_path}")
-    print(f"Num classes: {num_classes}")
-    print(f"Task: {task}")
-    print(f"Use CORAL: {use_coral}")
-    
-    # ════════════════════════════════════════════════════════════════════
-    # Create model
-    # ════════════════════════════════════════════════════════════════════
-    model = IVF_EffiMorphPP(
-        num_classes=num_classes,
-        task=task,
-        use_coral=use_coral
-    ).to(device)
-    
-    # ════════════════════════════════════════════════════════════════════
-    # Load state dict
-    # ════════════════════════════════════════════════════════════════════
-    state_dict = load_state_dict_robust(checkpoint_path, device)
-    
-    # ════════════════════════════════════════════════════════════════════
-    # Handle GeM parameter compatibility
-    # ════════════════════════════════════════════════════════════════════
-    if 'gap.p' in state_dict and 'gap.p' in model.state_dict():
-        ckpt_gap_p = state_dict['gap.p']
-        model_gap_p = model.state_dict()['gap.p']
-        
-        # Check shape mismatch
-        if ckpt_gap_p.shape != model_gap_p.shape:
-            print(f"\n[COMPAT] GeM parameter shape mismatch detected:")
-            print(f"  Checkpoint gap.p: {ckpt_gap_p.shape}")
-            print(f"  Model gap.p:      {model_gap_p.shape}")
-            
-            # Case 1: Checkpoint has scalar [1], model expects per-channel [1, C, 1, 1]
-            if ckpt_gap_p.numel() == 1 and model_gap_p.numel() > 1:
-                print(f"  → Converting scalar to per-channel format")
-                # Broadcast scalar to all channels
-                converted = ckpt_gap_p.view(1, 1, 1, 1).expand_as(model_gap_p).clone()
-                state_dict['gap.p'] = converted
-                print(f"  ✓ Converted shape: {converted.shape}")
-            
-            # Case 2: Checkpoint has per-channel, model expects scalar
-            elif ckpt_gap_p.numel() > 1 and model_gap_p.numel() == 1:
-                print(f"  → Converting per-channel to scalar format")
-                # Take mean across channels
-                converted = ckpt_gap_p.mean().view_as(model_gap_p)
-                state_dict['gap.p'] = converted
-                print(f"  ✓ Converted shape: {converted.shape}")
-            
-            # Case 3: Incompatible shapes
-            else:
-                print(f"  ⚠ Incompatible shapes, removing gap.p (will reinitialize)")
-                del state_dict['gap.p']
-    
-    # ════════════════════════════════════════════════════════════════════
-    # Load with error handling
-    # ════════════════════════════════════════════════════════════════════
-    try:
-        model.load_state_dict(state_dict, strict=strict)
-        print(f"\n✓ Checkpoint loaded successfully (strict={strict})")
-    except RuntimeError as e:
-        error_msg = str(e)
-        
-        # If still failing due to gap.p, remove it and retry
-        if "gap.p" in error_msg:
-            print(f"\n⚠ Failed to load with gap.p, removing and retrying...")
-            state_dict.pop('gap.p', None)
-            model.load_state_dict(state_dict, strict=False)
-            print(f"✓ Checkpoint loaded (gap.p reinitialized, strict=False)")
-        else:
-            # Other errors - try non-strict mode
-            if strict:
-                print(f"\n⚠ Strict loading failed, retrying with strict=False")
-                print(f"   Error: {error_msg[:200]}...")
-                
-                missing, unexpected = model.load_state_dict(state_dict, strict=False)
-                
-                if missing:
-                    print(f"\n  Missing keys ({len(missing)}):")
-                    for key in missing[:5]:
-                        print(f"    - {key}")
-                    if len(missing) > 5:
-                        print(f"    ... and {len(missing)-5} more")
-                
-                if unexpected:
-                    print(f"\n  Unexpected keys ({len(unexpected)}):")
-                    for key in unexpected[:5]:
-                        print(f"    - {key}")
-                    if len(unexpected) > 5:
-                        print(f"    ... and {len(unexpected)-5} more")
-                
-                print(f"\n✓ Checkpoint loaded (strict=False)")
-            else:
-                raise e
-    
-    print(f"{'='*70}\n")
-    
-    return model
 
 
 def normalize_labels_in_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -313,7 +173,7 @@ def main():
                         help="Split to evaluate: test or val (default: test)")
     parser.add_argument("--img_dir", type=str, default="data/blastocyst_Dataset/Images")
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--num_workers", type=int, default=2)  # safer on colab
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_strict", action="store_true")
     parser.add_argument("--use_coral", type=int, default=0)
@@ -354,25 +214,19 @@ def main():
     # Model outputs (training) classes:
     train_num_classes = 5 if args.task == "exp" else 3
 
-    # ════════════════════════════════════════════════════════════════════
-    # CORAL auto-detect
-    # ════════════════════════════════════════════════════════════════════
+    # CORAL auto-detect for EXP
     use_coral_flag = bool(args.use_coral)
-    
-    # Quick check of checkpoint to infer CORAL
-    temp_state = load_state_dict_robust(args.checkpoint, device)
-    if "head.4.weight" in temp_state:
-        out_dim = temp_state["head.4.weight"].shape[0]
+    state_dict = load_state_dict_robust(args.checkpoint, device)
+    if "head.4.weight" in state_dict:
+        out_dim = state_dict["head.4.weight"].shape[0]
         inferred_coral = (out_dim == train_num_classes - 1)
         if not use_coral_flag and inferred_coral:
             print(f"[INFO] Checkpoint has {out_dim} outputs; auto-enabling CORAL")
             use_coral_flag = True
 
-    # CORAL threshold handling
     user_provided_thr = args.coral_thr is not None
     coral_thr_value = args.coral_thr if user_provided_thr else DEFAULT_CORAL_THR
     auto_thr_enabled = bool(args.auto_thr)
-    
     if use_coral_flag and auto_thr_enabled and not user_provided_thr:
         auto_thr = find_automatic_coral_threshold(Path(args.checkpoint), Path(args.out_dir))
         if auto_thr is not None:
@@ -380,18 +234,9 @@ def main():
         else:
             print(f"[AUTO CORAL] No tuned threshold found; falling back to default {coral_thr_value:.2f}")
 
-    # ════════════════════════════════════════════════════════════════════
-    # FIXED: Load model with compatibility handling
-    # ════════════════════════════════════════════════════════════════════
+    model = IVF_EffiMorphPP(train_num_classes, task=args.task, use_coral=use_coral_flag).to(device)
     strict = not args.no_strict
-    model = load_model_compatible(
-        checkpoint_path=args.checkpoint,
-        num_classes=train_num_classes,
-        task=args.task,
-        use_coral=use_coral_flag,
-        device=device,
-        strict=strict
-    )
+    model.load_state_dict(state_dict, strict=strict)
     model.eval()
 
     # CORAL decoding thresholds
@@ -402,7 +247,6 @@ def main():
             out = model(dummy)
             expected_logits = train_num_classes - 1
             assert out.shape[1] == expected_logits, f"Expected {expected_logits} CORAL logits, got {out.shape[1]}"
-        
         if args.coral_thr_last is not None:
             coral_thresholds = [coral_thr_value, coral_thr_value, coral_thr_value, args.coral_thr_last]
             print(f"[CORAL] Using per-threshold decoding: {coral_thresholds}")
@@ -410,9 +254,7 @@ def main():
             coral_thresholds = coral_thr_value
             print(f"[CORAL] Using uniform threshold: {coral_thresholds}")
 
-    # ════════════════════════════════════════════════════════════════════
     # Predict
-    # ════════════════════════════════════════════════════════════════════
     all_preds: List[int] = []
     all_probs: List[List[float]] = []
     all_img_names: List[str] = []
@@ -441,9 +283,6 @@ def main():
                 else:
                     all_img_names.extend([str(x) for x in img_names])
 
-    # ════════════════════════════════════════════════════════════════════
-    # Save results
-    # ════════════════════════════════════════════════════════════════════
     os.makedirs(args.out_dir, exist_ok=True)
     metrics_file = os.path.join(args.out_dir, f"metrics_{args.split}.json")
     preds_file = os.path.join(args.out_dir, f"preds_{args.split}.csv")
@@ -477,7 +316,7 @@ def main():
     used_images: List[str] = []
 
     if task == "exp":
-        # Evaluate EXP on ALL gold_test images
+        # Evaluate EXP on ALL gold_test images, mapping NA/invalid to class 5
         for _, r in preds_df.iterrows():
             gt = map_exp_gold_value(r["EXP"])
             pr = map_pred_exp(int(r["y_pred_raw"]))
@@ -488,14 +327,27 @@ def main():
         labels = list(range(eval_num_classes))
 
     else:
-        # Evaluate ICM/TE with filtering
+        # Evaluate ICM/TE only when EXP_gt not in [0,1] AND gold label is in {0,1,2}
         col = task.upper()
         exp_pred_label = exp_pred_series.name if exp_pred_series is not None else None
         if exp_pred_label:
             print(f"[ICM/TE] Filtering using predicted EXP column '{exp_pred_label}'.")
         
-        filter_by_exp = bool(args.authors_filter_exp01_for_icm_te)
+        # Diagnostic logging for raw labels
+        raw_series = preds_df[col].fillna("").astype(str).str.strip()
+        raw_unique = sorted({val if val != "" else "<EMPTY>" for val in raw_series.unique()})
+        raw_numeric = pd.to_numeric(preds_df[col], errors="coerce")
+        na_raw_count = int((raw_numeric == -1).sum())
+        nd_raw_count = int((raw_numeric == 3).sum())
+        print(f"[ICM/TE GOLD] Raw label values: {raw_unique}")
+        print(f"[ICM/TE GOLD] Samples with label -1 (NA): {na_raw_count}")
+        print(f"[ICM/TE GOLD] Samples with label 3 (ND): {nd_raw_count}")
         
+        filter_by_exp = bool(args.authors_filter_exp01_for_icm_te)
+        if filter_by_exp and exp_pred_label:
+            print("[ICM/TE] Applying authors exp {0,1} filter.")
+        
+        # Track exclusion reasons
         excluded_na = 0
         excluded_nd = 0
         excluded_other_invalid = 0
@@ -506,17 +358,18 @@ def main():
             exp_gt = map_exp_gold_value(r["EXP"])
             if filter_by_exp and exp_gt in [0, 1]:
                 excluded_exp_gt += 1
-                continue
-            
+                continue  # not defined for ICM/TE per authors
             exp_pred = exp_pred_series.loc[idx] if exp_pred_series is not None else None
             if filter_by_exp and exp_pred in [0, 1]:
                 excluded_exp_pred += 1
                 continue
             
+            # Get gold label - exclude if -1, 3, or invalid
+            raw_gold = str(r[col]).strip() if pd.notna(r[col]) else ""
             gt = map_icm_te_gold_value(r[col])
             
             if gt is None:
-                raw_gold = str(r[col]).strip() if pd.notna(r[col]) else ""
+                # Determine exclusion reason for logging
                 try:
                     raw_val = int(float(raw_gold)) if raw_gold else None
                 except (ValueError, TypeError):
@@ -528,24 +381,35 @@ def main():
                     excluded_nd += 1
                 else:
                     excluded_other_invalid += 1
-                continue
+                continue  # Skip this sample from evaluation
             
             pr = map_pred_icm_te(int(r["y_pred_raw"]))
             if pr is None:
+                # Prediction outside valid range - still include but map to closest valid
                 pr = int(r["y_pred_raw"])
-                pr = max(0, min(2, pr))
+                pr = max(0, min(2, pr))  # clamp to valid range
             
             y_true.append(gt)
             y_pred.append(pr)
             used_images.append(str(r["Image"]))
         
-        print(f"[ICM/TE] Excluded samples: NA={excluded_na}, ND={excluded_nd}, Other={excluded_other_invalid}, "
-              f"EXP_gt={{0,1}}={excluded_exp_gt}, EXP_pred={{0,1}}={excluded_exp_pred}")
+        # Log exclusion statistics
+        print(f"[ICM/TE] Excluded samples breakdown:")
+        print(f"  - Due to gold label -1 (NA): {excluded_na}")
+        print(f"  - Due to gold label 3 (ND): {excluded_nd}")
+        print(f"  - Due to other invalid gold labels: {excluded_other_invalid}")
+        if filter_by_exp:
+            print(f"  - Due to EXP_gt in {{0,1}}: {excluded_exp_gt}")
+            if exp_pred_label:
+                print(f"  - Due to EXP_pred in {{0,1}}: {excluded_exp_pred}")
+        total_excluded = excluded_na + excluded_nd + excluded_other_invalid + excluded_exp_gt + excluded_exp_pred
+        print(f"  - Total excluded: {total_excluded}")
+        print(f"  - Total evaluated: {len(y_true)}")
         
-        eval_num_classes = 3
+        eval_num_classes = 3  # 0, 1, 2 only
         labels = list(range(eval_num_classes))
 
-    # Calculate metrics
+    # Metrics (same names as Table 2 intent)
     acc = accuracy_score(y_true, y_pred)
     avg_prec = precision_score(y_true, y_pred, average="weighted", zero_division=0, labels=labels)
     avg_rec = recall_score(y_true, y_pred, average="weighted", zero_division=0, labels=labels)
@@ -559,7 +423,10 @@ def main():
     # Logging
     y_true_counts = Counter(y_true)
     print(f"y_true class counts (authors-style): {dict(y_true_counts)}")
-    
+    for cls in labels:
+        if y_true_counts.get(cls, 0) == 0:
+            print(f"WARNING: Class {cls} has 0 support in {args.split}")
+
     y_pred_counts = Counter(y_pred)
     counts_full = {i: int(y_pred_counts.get(i, 0)) for i in labels}
     ratios_full = {i: float(counts_full[i] / max(1, len(y_pred))) for i in labels}
@@ -569,7 +436,7 @@ def main():
     print(cm)
     print("Per-class recall:", per_rec.tolist())
 
-    # Save metrics
+    # Save
     out = {
         "task": task,
         "split": args.split,
