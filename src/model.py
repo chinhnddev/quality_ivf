@@ -282,9 +282,8 @@ class GeM(nn.Module):
         self.eps = eps
         self.per_channel = per_channel
         self.initial_p = p
-        
-        # Parameter will be initialized in first forward pass
-        self.p = None
+        # register placeholder so state_dict keys exist even before first forward
+        self.register_parameter("p", None)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # ════════════════════════════════════════════════════════
