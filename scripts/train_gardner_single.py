@@ -98,7 +98,7 @@ class FocalLoss(nn.Module):
         self,
         gamma: float = 2.0,
         weight: Optional[torch.Tensor] = None,
-        ignore_index: int = -1,
+        ignore_index: int = 3,
     ):
         super().__init__()
         self.gamma = gamma
@@ -204,12 +204,11 @@ class GardnerDataset(Dataset):
                 df = df[df["norm_label"].isin({"0", "1", "2", "3", "4"})].copy()
             else:
                 df = df[df["norm_label"].isin({"0", "1", "2", "ND"})].copy()
+                df.loc[df["norm_label"] == "ND", "norm_label"] = "3"
         elif split == "test":
             pass
         else:
             raise ValueError(f"Unknown split: {split}")
-
-        df.loc[df["norm_label"] == "ND", "norm_label"] = "3"
 
         self.df = df.reset_index(drop=True)
 
@@ -541,7 +540,9 @@ def train_one_run(cfg, args) -> None:
         use_sqrt_inv = bool(args.sampler_use_sqrt_inv)
         cap_ratio = float(args.sampler_cap_ratio)
 
-        class_counts_full = {c: label_counts.get(c, 0) for c in range(num_classes)}
+        valid_train_labels = [y for y in train_labels if 0 <= y < num_classes]
+        valid_label_counts = Counter(valid_train_labels)
+        class_counts_full = {c: valid_label_counts.get(c, 0) for c in range(num_classes)}
         class_weights = {}
         for cls_idx, count in class_counts_full.items():
             if count > 0:
@@ -887,7 +888,7 @@ def train_one_run(cfg, args) -> None:
             y = y.to(device)
             opt.zero_grad(set_to_none=True)
             logits = model(x)
-            valid_mask = y >= 0
+            valid_mask = (y >= 0) & (y < num_classes)
             if valid_mask.sum() == 0:
                 if scheduler_active:
                     scheduler.step()
