@@ -359,7 +359,7 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
                 print(f"{cls}:{recall[cls]:.3f} ", end="")
         print()
 
-    return {
+    metrics = {
         "acc": float(acc),
         "macro_f1": float(macro_f1),
         "weighted_f1": float(weighted_f1),
@@ -373,6 +373,10 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
         "y_true_ratios": dict(sorted(y_true_ratios.items())),
         "confusion_matrix": cm.tolist(),
     }
+    metrics["val_acc"] = metrics["acc"]
+    metrics["val_macro_f1"] = metrics["macro_f1"]
+    metrics["val_weighted_f1"] = metrics["weighted_f1"]
+    return metrics
 
 
 def collect_coral_logits(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
