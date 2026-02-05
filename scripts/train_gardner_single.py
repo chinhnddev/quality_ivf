@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -506,24 +507,36 @@ def train_one_run(cfg, args) -> None:
     sampler = None
 
     if use_weighted_sampler:
-        alpha = float(getattr(cfg.train, "sampler_alpha", 0.5))  # default 0.5
+        use_sqrt_inv = bool(args.sampler_use_sqrt_inv)
+        cap_ratio = float(args.sampler_cap_ratio)
 
-        sample_weights = []
-        for y in train_labels:
-            c = label_counts[int(y)]
-            w = (1.0 / c) ** alpha
-            sample_weights.append(w)
+        class_counts_full = {c: label_counts.get(c, 0) for c in range(num_classes)}
+        class_weights = {}
+        for cls_idx, count in class_counts_full.items():
+            if count > 0:
+                class_weights[cls_idx] = 1.0 / math.sqrt(count) if use_sqrt_inv else 1.0 / count
+            else:
+                class_weights[cls_idx] = 0.0
+
+        positive_weights = [w for w in class_weights.values() if w > 0]
+        if cap_ratio > 0.0 and positive_weights:
+            cap_value = cap_ratio * min(positive_weights)
+            for cls_idx in class_weights:
+                class_weights[cls_idx] = min(class_weights[cls_idx], cap_value)
+
+        sample_weights = [class_weights[int(y)] for y in train_labels]
 
         sampler = WeightedRandomSampler(
             weights=torch.tensor(sample_weights, dtype=torch.double),
             num_samples=len(sample_weights),
-            replacement=True
+            replacement=True,
         )
 
-        print("Using WeightedRandomSampler")
-        print(f"Class counts: {dict(sorted(label_counts.items()))}")
-        print(f"Class weights: {dict(sorted({cls: 1.0 / count for cls, count in label_counts.items()}.items()))}")
-        print(f"Sample weights (first 10): {sample_weights[:10]}")
+        print("[Sampler] Using WeightedRandomSampler")
+        print(f"[Sampler] use_sqrt_inv = {use_sqrt_inv}")
+        print(f"[Sampler] cap_ratio = {cap_ratio}")
+        print(f"[Sampler] class_counts = {dict(sorted(class_counts_full.items()))}")
+        print(f"[Sampler] class_weights (after cap) = {dict(sorted(class_weights.items()))}")
 
     # Warning if both are enabled
     if use_weighted_sampler and use_class_weights:
@@ -962,6 +975,8 @@ def main():
     parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--use_class_weights", type=int, default=None)
     parser.add_argument("--use_weighted_sampler", type=int, default=0, help="Use WeightedRandomSampler for training (0=OFF, 1=ON)")
+    parser.add_argument("--sampler_use_sqrt_inv", type=int, default=0, choices=[0, 1], help="Use sqrt-inverse frequency for sampler (0=OFF, 1=ON)")
+    parser.add_argument("--sampler_cap_ratio", type=float, default=0.0, help="Cap the max class weight relative to the min weight (0=OFF)")
     parser.add_argument(
         "--use_coral",
         type=int,
