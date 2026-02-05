@@ -422,6 +422,12 @@ def train_one_run(cfg, args) -> None:
     use_weighted_sampler = bool(args.use_weighted_sampler)
     use_coral = bool(args.use_coral) and task == "exp"
     label_smoothing_cfg = float(getattr(cfg.loss, "label_smoothing", 0.0)) if hasattr(cfg, "loss") else 0.0
+    
+    # Validate CORAL usage
+    if args.use_coral and task != "exp":
+        print(f"[WARNING] --use_coral=1 is only valid for EXP task (ordinal regression).")
+        print(f"[WARNING] Task '{task}' uses nominal classification. CORAL will be disabled.")
+        use_coral = False
 
     loss_name = "CORAL_BCEWithLogits" if use_coral and task == "exp" else ("CrossEntropyLoss" if task == "exp" else "FocalLoss")
     applied_smoothing = 0.0
@@ -509,6 +515,13 @@ def train_one_run(cfg, args) -> None:
             dummy_output = model(dummy_input)
             assert dummy_output.shape[1] == 4, f"Expected 4 CORAL logits for EXP, got {dummy_output.shape[1]}"
         print(f"[CORAL] Model outputs {dummy_output.shape[1]} logits for EXP ordinal regression")
+    elif task in ["icm", "te"]:
+        # Sanity check for nominal classification tasks
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, 224, 224).to(device)
+            dummy_output = model(dummy_input)
+            assert dummy_output.shape[1] == num_classes, f"Expected {num_classes} logits for {task.upper()}, got {dummy_output.shape[1]}"
+        print(f"[{task.upper()}] Model outputs {dummy_output.shape[1]} logits for nominal classification")
 
     # Dataloaders
     batch_size = int(cfg.train.batch_size)
