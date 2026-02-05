@@ -21,7 +21,7 @@ from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 from torchvision import transforms
 from PIL import Image
 
-ORDINAL_TASKS = {"exp", "icm", "te"}
+ORDINAL_TASKS = {"exp"}  # Only EXP is truly ordinal (grades 1→2→3→4→5); ICM/TE are nominal
 
 try:
     from torchinfo import summary as torchinfo_summary
@@ -117,8 +117,8 @@ def make_loss_fn(
     use_coral: bool = False,
     label_smoothing: float = 0.0,
 ) -> nn.Module:
-    if use_coral and task in ORDINAL_TASKS:
-        # CORAL loss for ordinal regression
+    if use_coral and task == "exp":
+        # CORAL loss for ordinal regression (EXP task only)
         return lambda logits, targets: coral_loss(logits, targets, num_classes)
     weights = None
     if use_class_weights:
@@ -484,8 +484,14 @@ def train_one_run(cfg, args) -> None:
     # Define flags early
     use_class_weights = bool(cfg.use_class_weights)
     use_weighted_sampler = bool(args.use_weighted_sampler)
-    use_coral = bool(args.use_coral) and task in ORDINAL_TASKS
+    use_coral = bool(args.use_coral)
     label_smoothing_cfg = float(getattr(cfg.loss, "label_smoothing", 0.0)) if hasattr(cfg, "loss") else 0.0
+    
+    # Validate CORAL usage - CORAL only for EXP task (ordinal regression)
+    if use_coral and task != "exp":
+        print(f"[WARNING] --use_coral=1 is only valid for EXP task (ordinal regression).")
+        print(f"[WARNING] Task '{task}' uses nominal classification. CORAL will be disabled.")
+        use_coral = False
 
     loss_name = "CORAL_BCEWithLogits" if use_coral else ("CrossEntropyLoss" if task == "exp" else "FocalLoss")
     applied_smoothing = 0.0
@@ -553,19 +559,22 @@ def train_one_run(cfg, args) -> None:
 
     # In sanity_overfit mode, disable dropout for true overfit test
     dropout_p_value = 0.0 if args.sanity_overfit else float(cfg.model.dropout)
+    
+    # CRITICAL FIX: CORAL only for EXP task!
+    use_coral_for_model = use_coral and task == "exp"
 
     # Sanity model scale preset
     if args.sanity_overfit:
         scale_mapping = {"small": 1.0, "base": 1.25, "large": 1.5}
         width_mult = scale_mapping[args.sanity_model_scale]
         # Auto-bump to 2.0 if params < 3M
-        temp_model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral)
+        temp_model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral_for_model)
         total_params = sum(p.numel() for p in temp_model.parameters())
         if total_params < 3_000_000 and args.sanity_model_scale == "large":
             width_mult = 2.0
-        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral)
+        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, width_mult=width_mult, task=task, use_coral=use_coral_for_model)
     else:
-        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, task=task, use_coral=use_coral)
+        model = IVF_EffiMorphPP(num_classes=num_classes, dropout_p=dropout_p_value, task=task, use_coral=use_coral_for_model)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
@@ -577,17 +586,21 @@ def train_one_run(cfg, args) -> None:
     if args.sanity_overfit:
         print(f"[SANITY MODE] Using dropout_p=0.0 for overfitting test")
 
-    # Safety check for CORAL
-    if use_coral:
-        # Test forward pass to check output shape
+    # Safety check for model output shape
+    if use_coral and task == "exp":
+        # Test forward pass to check output shape for CORAL (ordinal regression)
         with torch.no_grad():
             dummy_input = torch.randn(1, 3, 224, 224).to(device)
             dummy_output = model(dummy_input)
-            expected_coral = num_classes - 1
-            assert dummy_output.shape[1] == expected_coral, (
-                f"Expected {expected_coral} CORAL logits for {task}, got {dummy_output.shape[1]}"
-            )
-        print(f"[CORAL] Model outputs {expected_coral} logits for {task} ordinal regression")
+            assert dummy_output.shape[1] == 4, f"Expected 4 CORAL logits for EXP, got {dummy_output.shape[1]}"
+        print(f"[CORAL] Model outputs {dummy_output.shape[1]} logits for EXP ordinal regression")
+    elif task in ["icm", "te"]:
+        # Sanity check for nominal classification tasks
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, 224, 224).to(device)
+            dummy_output = model(dummy_input)
+            assert dummy_output.shape[1] == num_classes, f"Expected {num_classes} logits for {task.upper()}, got {dummy_output.shape[1]}"
+        print(f"[{task.upper()}] Model outputs {dummy_output.shape[1]} logits for nominal classification")
 
     # Dataloaders
     batch_size = int(cfg.train.batch_size)
