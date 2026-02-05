@@ -27,7 +27,7 @@ def compute_class_weights(
     labels: Iterable[int],
     num_classes: int,
     eps: float = 1e-8,
-    beta: float = 0.9999  # Effective Number hyperparam (close to 1 → strong reweight for rare classes)
+    beta: float = 0.99  # Effective Number hyperparam (close to 1 → strong reweight for rare classes)
 ) -> torch.Tensor:
     """
     Compute class weights using Effective Number of Samples (Cui et al. 2019):
@@ -69,39 +69,47 @@ def compute_class_weights(
 # ------------------------------------------------------------
 class FocalLoss(nn.Module):
     """
-    Multi-class focal loss with optional alpha (class-balanced):
-        FL = alpha_t * (1 - p_t)^gamma * CE
-    Works on logits directly.
+    Multi-class focal loss with optional alpha class weights and ignore index.
     """
     def __init__(
         self,
         gamma: float = 2.0,
         alpha: Optional[torch.Tensor] = None,
-        weight: Optional[torch.Tensor] = None
+        reduction: str = "mean",
+        ignore_index: int = 3
     ):
         super().__init__()
         self.gamma = gamma
-        self.alpha = alpha  # shape (C,) or None
-        if weight is not None:
-            self.register_buffer("weight", weight)
-        else:
-            self.weight = None
+        self.alpha = alpha
+        self.reduction = reduction
+        self.ignore_index = ignore_index
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        alpha = self.alpha
+        if alpha is not None and alpha.device != logits.device:
+            alpha = alpha.to(logits.device)
+            self.alpha = alpha
+
         ce = F.cross_entropy(
             logits,
             targets,
-            weight=self.weight,
+            weight=alpha,
+            ignore_index=self.ignore_index,
             reduction="none"
         )
         pt = torch.exp(-ce)
-        focal = (1.0 - pt) ** self.gamma * ce
+        focal_loss = ((1.0 - pt) ** self.gamma) * ce
 
-        if self.alpha is not None:
-            alpha_t = self.alpha[targets]
-            focal = alpha_t * focal
-
-        return focal.mean()
+        if self.reduction == "mean":
+            mask = targets != self.ignore_index
+            if mask.sum() == 0:
+                return torch.tensor(0.0, device=logits.device)
+            return focal_loss[mask].mean()
+        elif self.reduction == "sum":
+            mask = targets != self.ignore_index
+            return focal_loss[mask].sum()
+        else:
+            return focal_loss
 
 
 # ------------------------------------------------------------

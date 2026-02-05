@@ -60,7 +60,8 @@ class GardnerDataset(Dataset):
                 valid = {"0", "1", "2", "3", "4"}
                 df = df[df["norm_label"].isin(valid)].copy()
             else:  # icm / te
-                df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
+                df = df[df["norm_label"].isin({"0", "1", "2", "ND"})].copy()
+                df.loc[df["norm_label"] == "ND", "norm_label"] = "3"
         elif self.split == "test":
             pass
         else:
@@ -77,7 +78,7 @@ class GardnerDataset(Dataset):
         if self.task == "exp":
             self.labels = [parse_norm_label(lbl) for lbl in self.labels_raw]
         else:
-            mapping = {"0": 0, "1": 1, "2": 2}
+            mapping = {"0": 0, "1": 1, "2": 2, "3": 3}
             self.labels = [mapping.get(tok, -1) for tok in self.labels_raw]
 
         # Transforms
