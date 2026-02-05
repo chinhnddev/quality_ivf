@@ -116,6 +116,7 @@ def make_loss_fn(
     use_weighted_sampler: bool = False,
     use_coral: bool = False,
     label_smoothing: float = 0.0,
+    device: Optional[torch.device] = None,
 ) -> nn.Module:
     if use_coral and task == "exp":
         # CORAL loss for ordinal regression (EXP task only)
@@ -131,6 +132,8 @@ def make_loss_fn(
             print(f"[OK] Class weights computed for task={task}:")
             for i, w in enumerate(weights.tolist()):
                 print(f"  Class {i}: weight={w:.4f}")
+        if device is not None:
+            weights = weights.to(device)
     if track == "benchmark_fair":
         smoothing = 0.0 if use_weighted_sampler or sanity_mode else 0.0
         return nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
@@ -655,7 +658,8 @@ def train_one_run(cfg, args) -> None:
     # Loss
     loss_fn = make_loss_fn(track=track, task=task, num_classes=num_classes,
                            use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode,
-                           use_weighted_sampler=use_weighted_sampler, use_coral=use_coral, label_smoothing=label_smoothing_cfg)
+                           use_weighted_sampler=use_weighted_sampler, use_coral=use_coral, label_smoothing=label_smoothing_cfg,
+                           device=device)
 
     # Optimizer / scheduler
     optimizer_cfg = cfg.optimizer
