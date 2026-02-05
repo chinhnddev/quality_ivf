@@ -130,8 +130,8 @@ def get_loss_fn(
     """
     weight = None
     if use_class_weights:
-        weight = compute_class_weights(train_labels, num_classes, beta=0.9999)
-        print(f"[INFO] Class weights for task={task} (Effective Num, beta=0.9999):")
+        weight = compute_class_weights(train_labels, num_classes, beta=0.99)
+        print(f"[INFO] Class weights for task={task} (Effective Num, beta=0.99):")
         for i, w in enumerate(weight.tolist()):
             print(f"  Class {i}: weight={w:.4f}")
 
