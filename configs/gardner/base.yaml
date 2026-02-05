@@ -79,7 +79,7 @@ metrics:
 
 # Validation / checkpointing
 monitor:
-  metric: macro_f1
+  metric: weighted_f1
   mode: max
   patience: 10
 
