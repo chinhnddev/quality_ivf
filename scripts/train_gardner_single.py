@@ -94,16 +94,27 @@ def compute_class_weights(labels: List[int], num_classes: int, eps: float = 1e-8
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, gamma: float = 2.0, weight: Optional[torch.Tensor] = None):
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        weight: Optional[torch.Tensor] = None,
+        ignore_index: int = 3,
+    ):
         super().__init__()
         self.gamma = gamma
+        self.ignore_index = ignore_index
         self.register_buffer("weight", weight if weight is not None else None)
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        ce = nn.functional.cross_entropy(logits, target, weight=self.weight, reduction="none")
+        ce = nn.functional.cross_entropy(
+            logits, target, weight=self.weight, reduction="none", ignore_index=self.ignore_index
+        )
         pt = torch.exp(-ce)
         loss = ((1 - pt) ** self.gamma) * ce
-        return loss.mean()
+        mask = target != self.ignore_index
+        if mask.sum() == 0:
+            return torch.tensor(0.0, device=logits.device)
+        return loss[mask].mean()
 
 
 def make_loss_fn(
@@ -192,11 +203,13 @@ class GardnerDataset(Dataset):
             if label_col == "EXP":
                 df = df[df["norm_label"].isin({"0", "1", "2", "3", "4"})].copy()
             else:
-                df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
+                df = df[df["norm_label"].isin({"0", "1", "2", "ND"})].copy()
         elif split == "test":
             pass
         else:
             raise ValueError(f"Unknown split: {split}")
+
+        df.loc[df["norm_label"] == "ND", "norm_label"] = "3"
 
         self.df = df.reset_index(drop=True)
 
@@ -276,6 +289,22 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
             pred = logits.argmax(dim=1).cpu().numpy().tolist()
         ys.extend(y.numpy().tolist())
         ps.extend(pred)
+    # Determine label space based on task
+    if task == "exp":
+        labels = list(range(5))  # 0-4 for EXP
+    else:
+        labels = list(range(3))  # 0-2 for ICM/TE (valid classes only during training)
+
+    valid_label_set = set(labels)
+    ys_filtered = []
+    ps_filtered = []
+    for y_val, p_val in zip(ys, ps):
+        if y_val in valid_label_set:
+            ys_filtered.append(y_val)
+            ps_filtered.append(p_val)
+    ys = ys_filtered
+    ps = ps_filtered
+
     acc = accuracy_score(ys, ps) if len(ys) else 0.0
     macro_f1 = f1_score(ys, ps, average="macro") if len(ys) else 0.0
     weighted_f1 = f1_score(ys, ps, average="weighted") if len(ys) else 0.0
@@ -290,12 +319,6 @@ def evaluate_on_val(model: nn.Module, loader: DataLoader, device: torch.device, 
     total = len(ps) if ps else 1
     y_pred_ratios = {cls: count / total for cls, count in y_pred_counts.items()}
     y_true_ratios = {cls: count / total for cls, count in y_true_counts.items()}
-
-    # Determine label space based on task
-    if task == "exp":
-        labels = list(range(5))  # 0-4 for EXP
-    else:
-        labels = list(range(3))  # 0-2 for ICM/TE (valid classes only during training)
 
     # Compute confusion matrix
     cm = confusion_matrix(ys, ps, labels=labels)
@@ -472,8 +495,7 @@ def train_one_run(cfg, args) -> None:
     print("num_classes=", num_classes)
 
     # Collect train labels (after filtering) for class weights
-    train_labels = [int(ds_train.df[label_col].iloc[i]) if label_col == "EXP" else int(ds_train.df[label_col].iloc[i])
-                    for i in range(len(ds_train.df))]
+    train_labels = [int(ds_train.df["norm_label"].iloc[i]) for i in range(len(ds_train.df))]
 
     # Log class distribution
     from collections import Counter
@@ -533,7 +555,7 @@ def train_one_run(cfg, args) -> None:
             for cls_idx in class_weights:
                 class_weights[cls_idx] = min(class_weights[cls_idx], cap_value)
 
-        sample_weights = [class_weights[int(y)] for y in train_labels]
+        sample_weights = [class_weights.get(int(y), 0.0) for y in train_labels]
 
         sampler = WeightedRandomSampler(
             weights=torch.tensor(sample_weights, dtype=torch.double),
