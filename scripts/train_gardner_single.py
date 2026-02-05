@@ -98,7 +98,7 @@ class FocalLoss(nn.Module):
         self,
         gamma: float = 2.0,
         weight: Optional[torch.Tensor] = None,
-        ignore_index: int = 3,
+        ignore_index: int = -1,
     ):
         super().__init__()
         self.gamma = gamma
@@ -887,13 +887,21 @@ def train_one_run(cfg, args) -> None:
             y = y.to(device)
             opt.zero_grad(set_to_none=True)
             logits = model(x)
+            valid_mask = y >= 0
+            if valid_mask.sum() == 0:
+                if scheduler_active:
+                    scheduler.step()
+                continue
+            logits = logits[valid_mask]
+            y = y[valid_mask]
             loss = loss_fn(logits, y)
             loss.backward()
             opt.step()
             if scheduler_active:
                 scheduler.step()  # Update LR after each batch
-            running += loss.item() * x.size(0)
-            n += x.size(0)
+            batch_count = logits.size(0)
+            running += loss.item() * batch_count
+            n += batch_count
 
         train_loss = running / max(n, 1)
 

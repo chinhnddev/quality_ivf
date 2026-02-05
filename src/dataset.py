@@ -54,6 +54,9 @@ class GardnerDataset(Dataset):
         else:
             raise ValueError(f"Unknown task: {self.task}")
 
+        # Keep raw tokens for logging before any remapping for training.
+        df["label_raw"] = df["norm_label"]
+
         # Filtering
         if self.split in {"train", "val"}:
             if self.task == "exp":
@@ -61,7 +64,8 @@ class GardnerDataset(Dataset):
                 df = df[df["norm_label"].isin(valid)].copy()
             else:  # icm / te
                 df = df[df["norm_label"].isin({"0", "1", "2", "ND"})].copy()
-                df.loc[df["norm_label"] == "ND", "norm_label"] = "3"
+                # Map ND labels to -1 so the loss can skip them safely
+                df.loc[df["norm_label"] == "ND", "norm_label"] = "-1"
         elif self.split == "test":
             pass
         else:
@@ -71,15 +75,15 @@ class GardnerDataset(Dataset):
 
         self.images = df["Image"].tolist()
 
-        self.labels_raw = df["norm_label"].tolist()
+        self.labels_raw = df["label_raw"].tolist()
         if self.split in {"test", "gold_test"}:
             print(f"[DATASET] {self.task.upper()} {self.split} labels_raw counter: "
                   f"{Counter(self.labels_raw)}")
         if self.task == "exp":
             self.labels = [parse_norm_label(lbl) for lbl in self.labels_raw]
         else:
-            mapping = {"0": 0, "1": 1, "2": 2, "3": 3}
-            self.labels = [mapping.get(tok, -1) for tok in self.labels_raw]
+            mapping = {"0": 0, "1": 1, "2": 2, "ND": -1, "-1": -1}
+            self.labels = [mapping.get(tok, -1) for tok in df["norm_label"].astype(str).tolist()]
 
         # Transforms
         if self.augment:
