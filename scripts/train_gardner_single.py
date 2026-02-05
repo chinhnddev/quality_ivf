@@ -592,7 +592,8 @@ def train_one_run(cfg, args) -> None:
         with torch.no_grad():
             dummy_input = torch.randn(1, 3, 224, 224).to(device)
             dummy_output = model(dummy_input)
-            assert dummy_output.shape[1] == 4, f"Expected 4 CORAL logits for EXP, got {dummy_output.shape[1]}"
+            expected_coral_logits = num_classes - 1  # CORAL uses K-1 logits for K classes
+            assert dummy_output.shape[1] == expected_coral_logits, f"Expected {expected_coral_logits} CORAL logits for EXP (num_classes={num_classes}), got {dummy_output.shape[1]}"
         print(f"[CORAL] Model outputs {dummy_output.shape[1]} logits for EXP ordinal regression")
     elif task in ["icm", "te"]:
         # Sanity check for nominal classification tasks
