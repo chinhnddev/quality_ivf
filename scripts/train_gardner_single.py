@@ -660,6 +660,8 @@ def train_one_run(cfg, args) -> None:
                            use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode,
                            use_weighted_sampler=use_weighted_sampler, use_coral=use_coral, label_smoothing=label_smoothing_cfg,
                            device=device)
+    if isinstance(loss_fn, nn.Module) and device is not None:
+        loss_fn = loss_fn.to(device)
 
     # Optimizer / scheduler
     optimizer_cfg = cfg.optimizer
