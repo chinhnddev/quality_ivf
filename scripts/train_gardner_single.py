@@ -76,55 +76,6 @@ def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
-def make_loss_fn(
-    track: str,
-    task: str,
-    num_classes: int,
-    use_class_weights: bool,
-    train_labels: List[int],
-    sanity_mode: bool = False,
-    use_weighted_sampler: bool = False,
-    use_coral: bool = False,
-    label_smoothing: float = 0.0,
-    device: Optional[torch.device] = None,
-) -> nn.Module:
-    if use_coral and task == "exp":
-        # CORAL loss for ordinal regression (EXP task only)
-        return lambda logits, targets: coral_loss(logits, targets, num_classes)
-    
-    weights = None
-    if use_class_weights:
-        # Use the centralized function from src.losses
-        from src.losses import compute_class_weights_v1, compute_class_weights_v2
-        
-        if task == "exp":
-            weights = compute_class_weights_v1(train_labels, num_classes, beta=0.9999)
-        else:
-            weights = compute_class_weights_v2(train_labels, num_classes, beta=0.9999, max_ratio=10.0)
-        
-        print(f"[OK] Class weights computed for task={task}:")
-        for i, w in enumerate(weights.tolist()):
-            print(f"  Class {i}: weight={w:.4f}")
-        if device is not None:
-            weights = weights.to(device)
-    
-    if track == "benchmark_fair":
-        return nn.CrossEntropyLoss(weight=weights, label_smoothing=0.0)
-    
-    if track == "improved":
-        if task == "exp":
-            return nn.CrossEntropyLoss(weight=weights, label_smoothing=float(label_smoothing))
-        # ✅ FIXED: Remove weight=weights parameter
-        return FocalLoss(
-            gamma=2.0,
-            alpha=weights,
-            reduction="mean",
-            ignore_index=3,
-        )
-    
-    raise ValueError(f"Unknown track: {track}")
-
-
 # =========================
 # Dataset
 # =========================
@@ -648,10 +599,22 @@ def train_one_run(cfg, args) -> None:
     print("="*80 + "\n")
 
     # Loss
-    loss_fn = make_loss_fn(track=track, task=task, num_classes=num_classes,
-                           use_class_weights=use_class_weights, train_labels=train_labels, sanity_mode=sanity_mode,
-                           use_weighted_sampler=use_weighted_sampler, use_coral=use_coral, label_smoothing=label_smoothing_cfg,
-                           device=device)
+    if use_coral and task == "exp":
+        loss_fn = lambda logits, targets: coral_loss(logits, targets, num_classes)
+    else:
+        effective_label_smoothing = label_smoothing_cfg
+        if task == "exp" and (use_weighted_sampler or sanity_mode):
+            effective_label_smoothing = 0.0
+        focal_gamma_cfg = float(getattr(cfg.loss, "focal_gamma", 2.0))
+        loss_fn = get_loss_fn(
+            track=track,
+            task=task,
+            num_classes=num_classes,
+            train_labels=train_labels,
+            use_class_weights=use_class_weights,
+            label_smoothing=effective_label_smoothing,
+            focal_gamma=focal_gamma_cfg,
+        )
     if isinstance(loss_fn, nn.Module) and device is not None:
         loss_fn = loss_fn.to(device)
 
