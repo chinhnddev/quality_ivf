@@ -91,24 +91,37 @@ def make_loss_fn(
     if use_coral and task == "exp":
         # CORAL loss for ordinal regression (EXP task only)
         return lambda logits, targets: coral_loss(logits, targets, num_classes)
+    
     weights = None
     if use_class_weights:
-        weights = compute_class_weights(train_labels, num_classes, beta=0.9999)
+        # Use the centralized function from src.losses
+        from src.losses import compute_class_weights_v1, compute_class_weights_v2
+        
+        if task == "exp":
+            weights = compute_class_weights_v1(train_labels, num_classes, beta=0.9999)
+        else:
+            weights = compute_class_weights_v2(train_labels, num_classes, beta=0.9999, max_ratio=10.0)
+        
         print(f"[OK] Class weights computed for task={task}:")
         for i, w in enumerate(weights.tolist()):
             print(f"  Class {i}: weight={w:.4f}")
         if device is not None:
             weights = weights.to(device)
+    
     if track == "benchmark_fair":
         return nn.CrossEntropyLoss(weight=weights, label_smoothing=0.0)
+    
     if track == "improved":
         if task == "exp":
             return nn.CrossEntropyLoss(weight=weights, label_smoothing=float(label_smoothing))
+        # ✅ FIXED: Remove weight=weights parameter
         return FocalLoss(
             gamma=2.0,
             alpha=weights,
+            reduction="mean",
             ignore_index=3,
         )
+    
     raise ValueError(f"Unknown track: {track}")
 
 

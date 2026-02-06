@@ -2,8 +2,8 @@
 Loss utilities for Gardner EXP / ICM / TE experiments.
 
 Supported:
-- CrossEntropy (optionally with class weights)
-- CrossEntropy with label smoothing (EXP improved)
+- CrossEntropyLoss (optionally with class weights)
+- CrossEntropyLoss with label smoothing (EXP improved)
 - Focal Loss with alpha (ICM/TE improved)
 - Effective Number of Samples weighting (better for extreme imbalance)
 
@@ -21,15 +21,17 @@ import torch.nn.functional as F
 
 
 # ------------------------------------------------------------
-# Class weight utilities (Effective Number of Samples)
+# Class weight utilities - V1 (Original for EXP)
 # ------------------------------------------------------------
-def compute_class_weights(
+def compute_class_weights_v1(
     labels: Iterable[int],
     num_classes: int,
     eps: float = 1e-8,
-    beta: float = 0.9999  # Effective Number hyperparam (close to 1 → strong reweight for rare classes)
+    beta: float = 0.9999
 ) -> torch.Tensor:
     """
+    Original version for EXP task (with normalization).
+    
     Compute class weights using Effective Number of Samples (Cui et al. 2019):
         effective_num = 1 - beta^n_c
         w_c = (1 - beta) / (effective_num + eps)
@@ -43,7 +45,7 @@ def compute_class_weights(
     effective_num = 1.0 - np.power(beta, counts)
     weights = (1.0 - beta) / (effective_num + eps)
 
-    # Normalize weights to sum to num_classes
+    # Normalize weights to sum to num_classes (KEEP FOR EXP)
     sum_w = weights.sum()
     if sum_w > 0:
         weights = weights / sum_w * num_classes
@@ -56,12 +58,90 @@ def compute_class_weights(
         valid_weights = weights[~missing]
         if len(valid_weights) > 0:
             mean_valid = valid_weights.mean()
-            weights[missing] = mean_valid * 1.5  # nhẹ boost
+            weights[missing] = mean_valid * 1.5
         else:
             weights[missing] = 1.0
         print(f"[INFO] Boosted weights for missing classes: {weights[missing].tolist()}")
 
     return torch.tensor(weights, dtype=torch.float32)
+
+
+# ------------------------------------------------------------
+# Class weight utilities - V2 (New for ICM/TE)
+# ------------------------------------------------------------
+def compute_class_weights_v2(
+    labels: Iterable[int],
+    num_classes: int,
+    eps: float = 1e-8,
+    beta: float = 0.9999,
+    max_ratio: float = 10.0
+) -> torch.Tensor:
+    """
+    New version for ICM/TE tasks (no normalization, with clipping).
+    
+    Compute class weights using Effective Number of Samples (Cui et al. 2019):
+        effective_num = 1 - beta^n_c
+        w_c = (1 - beta) / (effective_num + eps)
+    
+    Key differences from V1:
+    - NO normalization (keep raw Effective Number weights)
+    - WITH clipping (max_ratio to prevent extreme weights)
+    """
+    counts = np.zeros(num_classes, dtype=np.float64)
+    for y in labels:
+        if 0 <= int(y) < num_classes:
+            counts[int(y)] += 1
+
+    effective_num = 1.0 - np.power(beta, counts)
+    weights = (1.0 - beta) / (effective_num + eps)
+
+    # NO NORMALIZATION for ICM/TE (keep raw weights)
+    print(f"[INFO] Raw Effective Number weights (before clipping): {weights.tolist()}")
+
+    # Boost missing classes lightly to avoid complete ignore
+    missing = counts == 0
+    if missing.any():
+        valid_weights = weights[~missing]
+        if len(valid_weights) > 0:
+            mean_valid = valid_weights.mean()
+            weights[missing] = mean_valid * 1.5
+        else:
+            weights[missing] = 1.0
+        print(f"[INFO] Boosted weights for missing classes: {weights[missing].tolist()}")
+    
+    weights = torch.tensor(weights, dtype=torch.float32)
+    
+    # Clip weights to prevent extreme ratios
+    if max_ratio > 0:
+        valid_mask = weights > 0
+        if valid_mask.sum() > 0:
+            min_w = weights[valid_mask].min()
+            max_w = min_w * max_ratio
+            weights_before = weights.clone()
+            weights = torch.clamp(weights, max=max_w)
+            
+            # Log if clipping occurred
+            if not torch.allclose(weights, weights_before):
+                print(f"[INFO] Clipped weights with max_ratio={max_ratio}:")
+                for i in range(len(weights)):
+                    if weights[i] != weights_before[i]:
+                        print(f"  Class {i}: {weights_before[i].item():.4f} → {weights[i].item():.4f}")
+    
+    return weights
+
+
+# Backward compatibility alias (will use v1 by default)
+def compute_class_weights(
+    labels: Iterable[int],
+    num_classes: int,
+    eps: float = 1e-8,
+    beta: float = 0.9999
+) -> torch.Tensor:
+    """
+    Backward compatibility function - defaults to V1 (original behavior).
+    Use compute_class_weights_v1() or compute_class_weights_v2() explicitly.
+    """
+    return compute_class_weights_v1(labels, num_classes, eps, beta)
 
 
 # ------------------------------------------------------------
@@ -127,11 +207,27 @@ def get_loss_fn(
 ) -> nn.Module:
     """
     Factory function to build the correct loss for a given task/track.
+    
+    EXP task uses V1 weights (normalized, stable).
+    ICM/TE tasks use V2 weights (raw, clipped).
     """
     weight = None
     if use_class_weights:
-        weight = compute_class_weights(train_labels, num_classes, beta=0.9999)
-        print(f"[INFO] Class weights for task={task} (Effective Num, beta=0.9999):")
+        if task == "exp":
+            # EXP: Use V1 (original with normalization)
+            weight = compute_class_weights_v1(train_labels, num_classes, beta=0.9999)
+            print(f"[INFO] EXP: Using V1 weights (normalized, beta=0.9999):")
+        else:
+            # ICM/TE: Use V2 (no normalization, with clipping)
+            weight = compute_class_weights_v2(
+                train_labels, 
+                num_classes, 
+                beta=0.9999, 
+                max_ratio=10.0
+            )
+            print(f"[INFO] {task.upper()}: Using V2 weights (raw, clipped, beta=0.9999):")
+        
+        # Print weights for all tasks
         for i, w in enumerate(weight.tolist()):
             print(f"  Class {i}: weight={w:.4f}")
 
@@ -159,7 +255,9 @@ def get_loss_fn(
             # ICM / TE: Focal + alpha (class-balanced)
             return FocalLoss(
                 gamma=focal_gamma,
-                alpha=weight,      # dùng weight làm alpha
+                alpha=weight,
+                reduction="mean",
+                ignore_index=3
             )
 
     raise ValueError(f"Unknown track: {track}")
