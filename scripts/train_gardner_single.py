@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import CORAL functions
 from src.loss_coral import coral_loss, coral_predict_class
-from src.losses import FocalLoss, compute_class_weights
+from src.losses import get_loss_fn, compute_class_weights
 from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_distribution
 
 
