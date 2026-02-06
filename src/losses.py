@@ -77,38 +77,29 @@ def compute_class_weights_v2(
     max_ratio: float = 10.0
 ) -> torch.Tensor:
     """
-    New version for ICM/TE tasks (no normalization, with clipping).
-    
-    Uses Effective Number of Samples:
-        E_n = (1 - β^n) / (1 - β)
-        weight = 1 / E_n
-
-    Key differences from V1:
-    - NO normalization (keep raw inverse effective number)
-    - WITH clipping (max_ratio to prevent extreme weights)
+    V2 for ICM/TE: Inverse frequency weights without normalization, plus clipping.
     """
     counts = np.zeros(num_classes, dtype=np.float64)
     for y in labels:
         if 0 <= int(y) < num_classes:
             counts[int(y)] += 1
 
+    total = counts.sum()
+    K = float(num_classes)
     weights = np.zeros(num_classes, dtype=np.float64)
     for c in range(num_classes):
         if counts[c] > 0:
-            effective_num = (1.0 - np.power(beta, counts[c])) / (1.0 - beta + eps)
-            weights[c] = 1.0 / (effective_num + eps)
+            weights[c] = total / (K * counts[c])
         else:
             weights[c] = 0.0
 
-    print(f"[INFO] Raw Effective Number weights (before clipping): {weights.tolist()}")
+    print(f"[INFO] Raw inverse-frequency weights (before clipping): {weights.tolist()}")
 
-    # Give missing classes a small boost
     missing = counts == 0
     if missing.any():
         valid_weights = weights[~missing]
         if len(valid_weights) > 0:
-            mean_valid = valid_weights.mean()
-            weights[missing] = mean_valid * 1.5
+            weights[missing] = valid_weights.mean() * 1.5
         else:
             weights[missing] = 1.0
         print(f"[INFO] Boosted weights for missing classes: {weights[missing].tolist()}")
@@ -120,15 +111,14 @@ def compute_class_weights_v2(
         if valid_mask.sum() > 0:
             min_w = weights_tensor[valid_mask].min()
             max_w = min_w * max_ratio
-            before_clip = weights_tensor.clone()
+            weights_before = weights_tensor.clone()
             weights_tensor = torch.clamp(weights_tensor, max=max_w)
-            if not torch.allclose(weights_tensor, before_clip):
+
+            if not torch.allclose(weights_tensor, weights_before):
                 print(f"[INFO] Clipped weights with max_ratio={max_ratio}:")
                 for i in range(len(weights_tensor)):
-                    before = before_clip[i].item()
-                    after = weights_tensor[i].item()
-                    if before != after:
-                        print(f"  Class {i}: {before:.4f} → {after:.4f}")
+                    if abs(weights_tensor[i] - weights_before[i]) > 1e-6:
+                        print(f"  Class {i}: {weights_before[i].item():.4f} → {weights_tensor[i].item():.4f}")
 
     return weights_tensor
 
