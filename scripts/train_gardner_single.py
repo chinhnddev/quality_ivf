@@ -107,7 +107,6 @@ def make_loss_fn(
         return FocalLoss(
             gamma=2.0,
             alpha=weights,
-            weight=weights,
             ignore_index=3,
         )
     raise ValueError(f"Unknown track: {track}")
