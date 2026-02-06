@@ -27,7 +27,7 @@ def compute_class_weights(
     labels: Iterable[int],
     num_classes: int,
     eps: float = 1e-8,
-    beta: float = 0.99  # Effective Number hyperparam (close to 1 → strong reweight for rare classes)
+    beta: float = 0.9999  # Effective Number hyperparam (close to 1 → strong reweight for rare classes)
 ) -> torch.Tensor:
     """
     Compute class weights using Effective Number of Samples (Cui et al. 2019):
@@ -130,8 +130,8 @@ def get_loss_fn(
     """
     weight = None
     if use_class_weights:
-        weight = compute_class_weights(train_labels, num_classes, beta=0.99)
-        print(f"[INFO] Class weights for task={task} (Effective Num, beta=0.99):")
+        weight = compute_class_weights(train_labels, num_classes, beta=0.9999)
+        print(f"[INFO] Class weights for task={task} (Effective Num, beta=0.9999):")
         for i, w in enumerate(weight.tolist()):
             print(f"  Class {i}: weight={w:.4f}")
 
@@ -156,11 +156,10 @@ def get_loss_fn(
                 label_smoothing=label_smoothing
             )
         else:
-            # ICM / TE: Focal + alpha (class-balanced) + weight
+            # ICM / TE: Focal + alpha (class-balanced)
             return FocalLoss(
                 gamma=focal_gamma,
                 alpha=weight,      # dùng weight làm alpha
-                weight=weight
             )
 
     raise ValueError(f"Unknown track: {track}")

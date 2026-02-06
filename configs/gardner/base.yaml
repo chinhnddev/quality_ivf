@@ -60,7 +60,7 @@ augmentation:
 # Model (IVF-EffiMorphPP)
 model:
   name: ivf_effimorphpp
-  dropout: 0.3
+  dropout: 0.2
   pretrained: false          # train from scratch (paper-consistent)
 
 # Loss defaults (overridden by track config)
