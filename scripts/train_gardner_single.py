@@ -119,8 +119,11 @@ class GardnerDataset(Dataset):
             if label_col == "EXP":
                 df = df[df["norm_label"].isin({"0", "1", "2", "3", "4"})].copy()
             else:
-                df = df[df["norm_label"].isin({"0", "1", "2", "ND"})].copy()
-                df.loc[df["norm_label"] == "ND", "norm_label"] = "3"
+                if task.lower() == "icm":
+                    df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
+                else:
+                    df = df[df["norm_label"].isin({"0", "1", "2", "ND"})].copy()
+                    df.loc[df["norm_label"] == "ND", "norm_label"] = "3"
         elif split == "test":
             pass
         else:
