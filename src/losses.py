@@ -79,12 +79,12 @@ def compute_class_weights_v2(
     """
     New version for ICM/TE tasks (no normalization, with clipping).
     
-    Compute class weights using Effective Number of Samples (Cui et al. 2019):
-        effective_num = 1 - beta^n_c
-        w_c = (1 - beta) / (effective_num + eps)
-    
+    Uses Effective Number of Samples:
+        E_n = (1 - β^n) / (1 - β)
+        weight = 1 / E_n
+
     Key differences from V1:
-    - NO normalization (keep raw Effective Number weights)
+    - NO normalization (keep raw inverse effective number)
     - WITH clipping (max_ratio to prevent extreme weights)
     """
     counts = np.zeros(num_classes, dtype=np.float64)
@@ -92,13 +92,17 @@ def compute_class_weights_v2(
         if 0 <= int(y) < num_classes:
             counts[int(y)] += 1
 
-    effective_num = 1.0 - np.power(beta, counts)
-    weights = (1.0 - beta) / (effective_num + eps)
+    weights = np.zeros(num_classes, dtype=np.float64)
+    for c in range(num_classes):
+        if counts[c] > 0:
+            effective_num = (1.0 - np.power(beta, counts[c])) / (1.0 - beta + eps)
+            weights[c] = 1.0 / (effective_num + eps)
+        else:
+            weights[c] = 0.0
 
-    # NO NORMALIZATION for ICM/TE (keep raw weights)
     print(f"[INFO] Raw Effective Number weights (before clipping): {weights.tolist()}")
 
-    # Boost missing classes lightly to avoid complete ignore
+    # Give missing classes a small boost
     missing = counts == 0
     if missing.any():
         valid_weights = weights[~missing]
@@ -108,26 +112,25 @@ def compute_class_weights_v2(
         else:
             weights[missing] = 1.0
         print(f"[INFO] Boosted weights for missing classes: {weights[missing].tolist()}")
-    
-    weights = torch.tensor(weights, dtype=torch.float32)
-    
-    # Clip weights to prevent extreme ratios
+
+    weights_tensor = torch.tensor(weights, dtype=torch.float32)
+
     if max_ratio > 0:
-        valid_mask = weights > 0
+        valid_mask = weights_tensor > 0
         if valid_mask.sum() > 0:
-            min_w = weights[valid_mask].min()
+            min_w = weights_tensor[valid_mask].min()
             max_w = min_w * max_ratio
-            weights_before = weights.clone()
-            weights = torch.clamp(weights, max=max_w)
-            
-            # Log if clipping occurred
-            if not torch.allclose(weights, weights_before):
+            before_clip = weights_tensor.clone()
+            weights_tensor = torch.clamp(weights_tensor, max=max_w)
+            if not torch.allclose(weights_tensor, before_clip):
                 print(f"[INFO] Clipped weights with max_ratio={max_ratio}:")
-                for i in range(len(weights)):
-                    if weights[i] != weights_before[i]:
-                        print(f"  Class {i}: {weights_before[i].item():.4f} → {weights[i].item():.4f}")
-    
-    return weights
+                for i in range(len(weights_tensor)):
+                    before = before_clip[i].item()
+                    after = weights_tensor[i].item()
+                    if before != after:
+                        print(f"  Class {i}: {before:.4f} → {after:.4f}")
+
+    return weights_tensor
 
 
 # Backward compatibility alias (will use v1 by default)
