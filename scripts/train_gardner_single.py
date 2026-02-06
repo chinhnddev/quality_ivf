@@ -605,7 +605,10 @@ def train_one_run(cfg, args) -> None:
         effective_label_smoothing = label_smoothing_cfg
         if task == "exp" and (use_weighted_sampler or sanity_mode):
             effective_label_smoothing = 0.0
-        focal_gamma_cfg = float(getattr(cfg.loss, "focal_gamma", 2.0))
+        focal_gamma_cfg = getattr(cfg.loss, "focal_gamma", 2.0)
+        if focal_gamma_cfg is None:
+            focal_gamma_cfg = 2.0
+        focal_gamma_cfg = float(focal_gamma_cfg)
         loss_fn = get_loss_fn(
             track=track,
             task=task,
