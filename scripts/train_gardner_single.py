@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import CORAL functions
 from src.loss_coral import coral_loss, coral_predict_class
+from src.losses import FocalLoss, compute_class_weights
 from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_distribution
 
 
@@ -75,48 +76,6 @@ def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
-def compute_class_weights(labels: List[int], num_classes: int, eps: float = 1e-8) -> torch.Tensor:
-    """Inverse-frequency normalized weights: w_c = N_total / (K * N_c)."""
-    counts = np.zeros(num_classes, dtype=np.float64)
-    for y in labels:
-        if 0 <= y < num_classes:
-            counts[y] += 1
-    total = counts.sum()
-    K = float(num_classes)
-    weights = np.zeros(num_classes, dtype=np.float64)
-    for c in range(num_classes):
-        if counts[c] > 0:
-            weights[c] = total / (K * (counts[c] + eps))
-        else:
-            # missing class: weight 0, warn upstream
-            weights[c] = 0.0
-    return torch.tensor(weights, dtype=torch.float32)
-
-
-class FocalLoss(nn.Module):
-    def __init__(
-        self,
-        gamma: float = 2.0,
-        weight: Optional[torch.Tensor] = None,
-        ignore_index: int = 3,
-    ):
-        super().__init__()
-        self.gamma = gamma
-        self.ignore_index = ignore_index
-        self.register_buffer("weight", weight if weight is not None else None)
-
-    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        ce = nn.functional.cross_entropy(
-            logits, target, weight=self.weight, reduction="none", ignore_index=self.ignore_index
-        )
-        pt = torch.exp(-ce)
-        loss = ((1 - pt) ** self.gamma) * ce
-        mask = target != self.ignore_index
-        if mask.sum() == 0:
-            return torch.tensor(0.0, device=logits.device)
-        return loss[mask].mean()
-
-
 def make_loss_fn(
     track: str,
     task: str,
@@ -134,29 +93,23 @@ def make_loss_fn(
         return lambda logits, targets: coral_loss(logits, targets, num_classes)
     weights = None
     if use_class_weights:
-        weights = compute_class_weights(train_labels, num_classes)
-        # Warning if any missing class
-        if (weights == 0).any():
-            missing = [i for i, w in enumerate(weights.tolist()) if w == 0.0]
-            print(f"[WARN] Missing classes in TRAIN for task={task}: {missing}. Their weight is set to 0.")
-        else:
-            print(f"[OK] Class weights computed for task={task}:")
-            for i, w in enumerate(weights.tolist()):
-                print(f"  Class {i}: weight={w:.4f}")
+        weights = compute_class_weights(train_labels, num_classes, beta=0.9999)
+        print(f"[OK] Class weights computed for task={task}:")
+        for i, w in enumerate(weights.tolist()):
+            print(f"  Class {i}: weight={w:.4f}")
         if device is not None:
             weights = weights.to(device)
     if track == "benchmark_fair":
-        smoothing = 0.0 if use_weighted_sampler or sanity_mode else 0.0
-        return nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
+        return nn.CrossEntropyLoss(weight=weights, label_smoothing=0.0)
     if track == "improved":
         if task == "exp":
-            if use_weighted_sampler or sanity_mode:
-                smoothing = 0.0
-            else:
-                smoothing = float(label_smoothing)
-            return nn.CrossEntropyLoss(weight=weights, label_smoothing=smoothing)
-        # focal for ICM/TE
-        return FocalLoss(gamma=2.0, weight=weights)
+            return nn.CrossEntropyLoss(weight=weights, label_smoothing=float(label_smoothing))
+        return FocalLoss(
+            gamma=2.0,
+            alpha=weights,
+            weight=weights,
+            ignore_index=3,
+        )
     raise ValueError(f"Unknown track: {track}")
 
 
@@ -979,7 +932,7 @@ def train_one_run(cfg, args) -> None:
         f.write(f"Confusion matrix at best epoch:\n{np.array(val_metrics.get('confusion_matrix', []))}\n")
         f.write(f"Class weights applied: {use_class_weights}\n")
         if use_class_weights:
-            weights = compute_class_weights(train_labels, num_classes)
+            weights = compute_class_weights(train_labels, num_classes, beta=0.9999)
             f.write(f"Class weights tensor: {weights.tolist()}\n")
         f.write(f"WeightedRandomSampler used: {use_weighted_sampler}\n")
         f.write(f"Current LR value: {opt.param_groups[0]['lr']:.6f}\n")
