@@ -62,7 +62,9 @@ class GardnerDataset(Dataset):
             if self.task == "exp":
                 valid = {"0", "1", "2", "3", "4"}
                 df = df[df["norm_label"].isin(valid)].copy()
-            else:  # icm / te
+            elif self.task == "icm":
+                df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
+            else:  # te
                 df = df[df["norm_label"].isin({"0", "1", "2", "ND"})].copy()
                 df.loc[df["norm_label"] == "ND", "norm_label"] = "3"
         elif self.split == "test":
