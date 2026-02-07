@@ -74,7 +74,7 @@ def compute_class_weights_v2(
     num_classes: int,
     eps: float = 1e-8,
     beta: float = 0.9999,
-    max_ratio: float = 10.0
+    max_ratio: float = 3.0
 ) -> torch.Tensor:
     """
     V2 for ICM/TE: Inverse frequency weights without normalization, plus clipping.
