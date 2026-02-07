@@ -122,89 +122,29 @@ class GardnerDataset(Dataset):
         return self._build_eval_transform()
 
     def _build_train_transform(self):
-        cfg_get = self._cfg_get
-        task = getattr(self, "task", "exp")
         img = int(self.image_size)
-
-        # =========================
-        # EXP (Expansion) - IVF-safe
-        # =========================
-        # EXP chủ yếu là "global scale/cavity size" => crop/scale là chính
-        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.90, 1.00)))
-        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.98, 1.02)))
-
-        hflip_p = float(cfg_get("hflip_p", 0.5))
-        vflip_p = float(cfg_get("vflip_p", 0.10))  # giảm mạnh
-
-        # Affine: chỉ rất nhẹ để simulate misalignment, KHÔNG biến dạng mạnh
-        affine_p = float(cfg_get("affine_p", 0.30))
-        translate = float(cfg_get("translate_limit", 0.03))   # 3%
-        scale = float(cfg_get("scale_limit", 0.06))           # ±6% là đủ cho EXP
-        rotate = float(cfg_get("rotate_limit", 6))            # ±6 deg
-
-        # Photometric: rất nhẹ để tránh phá biên cavity
-        bc_p = float(cfg_get("brightness_contrast_p", 0.20))
-        b_lim = float(cfg_get("brightness_limit", 0.05))
-        c_lim = float(cfg_get("contrast_limit", 0.05))
-
-        # CLAHE: mặc định TẮT cho EXP (nếu bật thì cực nhẹ)
-        use_clahe = bool(cfg_get("use_clahe", False))
-        clahe_p = float(cfg_get("clahe_p", 0.15))
-        clahe_clip = float(cfg_get("clahe_clip_limit", 2.0))
-
-        # Noise/blur: nhẹ
-        noise_p = float(cfg_get("noise_p", 0.12))
-        noise_std_range = tuple(cfg_get("noise_std_range", (0.01, 0.03)))
-
-        blur_p = float(cfg_get("blur_p", 0.10))
-        blur_limit = tuple(cfg_get("blur_limit", (3, 3)))  # blur cố định nhẹ, tránh 5
-
-        # Dropout: TẮT cho EXP (che cavity/viền TE là phá nhãn)
-        use_dropout = bool(cfg_get("use_coarse_dropout", False))
-        dropout_p = 0.0
-
-        pipeline = [
+        return A.Compose([
             A.RandomResizedCrop(
                 size=(img, img),
-                scale=crop_scale,
-                ratio=crop_ratio,
+                scale=(0.90, 1.00),
+                ratio=(0.98, 1.02),
                 interpolation=cv2.INTER_LINEAR,
             ),
-            A.HorizontalFlip(p=hflip_p),
-            A.VerticalFlip(p=vflip_p),
-
+            A.HorizontalFlip(p=0.5),
             A.Affine(
-                translate_percent={"x": (-translate, translate), "y": (-translate, translate)},
-                scale=(1 - scale, 1 + scale),
-                rotate=(-rotate, rotate),
+                translate_percent={"x": (-0.02, 0.02), "y": (-0.02, 0.02)},
+                scale=(0.97, 1.03),
+                rotate=(-5, 5),
                 interpolation=cv2.INTER_LINEAR,
-                p=affine_p,
+                p=0.25,
             ),
-
-            A.RandomBrightnessContrast(
-                brightness_limit=b_lim,
-                contrast_limit=c_lim,
-                p=bc_p if getattr(self, "color_jitter", False) else 0.0,
-            ),
-
-            A.CLAHE(clip_limit=clahe_clip, p=clahe_p) if use_clahe else A.NoOp(),
-
-            A.GaussNoise(std_range=noise_std_range, p=noise_p),
-            A.GaussianBlur(blur_limit=blur_limit, p=blur_p),
-
-            # EXP: no dropout
-            A.NoOp(),
-
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
-        ]
-        return A.Compose(pipeline)
-
+        ])
 
     def _build_eval_transform(self):
         img = int(self.image_size)
         resize_size = int(getattr(self, "resize_size", 256))
-
         return A.Compose([
             A.Resize(resize_size, resize_size, interpolation=cv2.INTER_LINEAR),
             A.CenterCrop(img, img),
