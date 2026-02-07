@@ -134,18 +134,15 @@ class GardnerDataset(Dataset):
                 width=self.image_size,
                 scale=crop_scale,
                 ratio=crop_ratio,
-                interpolation=A.Interpolation.BILINEAR,
-                antialias=True,
             ),
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
-            A.Rotate(limit=rotation_limit, p=0.7, interpolation=A.Interpolation.BILINEAR),
+            A.Rotate(limit=rotation_limit, p=0.7),
             A.ShiftScaleRotate(  # Thêm nhẹ để simulate misalignment
                 shift_limit=0.05,
                 scale_limit=0.1,
                 rotate_limit=10,
                 p=0.5,
-                interpolation=A.Interpolation.BILINEAR,
             ),
             A.CLAHE(clip_limit=clahe_clip, p=0.7),  # Enhance ICM/TE cell contrast
             A.GaussNoise(var_limit=(5, 20), p=0.3),  # Microscope noise nhẹ
@@ -166,7 +163,7 @@ class GardnerDataset(Dataset):
 
     def _build_eval_transform(self):
         return A.Compose([
-            A.Resize(self.image_size, self.image_size, interpolation=A.Interpolation.BILINEAR),
+            A.Resize(self.image_size, self.image_size),
             A.CenterCrop(self.image_size, self.image_size),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
