@@ -123,91 +123,78 @@ class GardnerDataset(Dataset):
 
     def _build_train_transform(self):
         cfg_get = self._cfg_get
-        task = getattr(self, "task", "exp")  # "exp" | "icm" | "te"
+        task = getattr(self, "task", "te")
         img = int(self.image_size)
 
-        # -------------------------
-        # Task-aware geometry
-        # -------------------------
-        if task == "exp":
-            crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.90, 1.00)))
-            crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.98, 1.02)))
+        # ----- TE: keep geometry mild, texture-preserving -----
+        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.88, 1.00)))
+        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.97, 1.03)))
 
-            vflip_p = float(cfg_get("vflip_p", 0.10))
+        hflip_p = float(cfg_get("hflip_p", 0.5))
+        vflip_p = float(cfg_get("vflip_p", 0.15))
 
-            ssr_p = float(cfg_get("ssr_p", 0.35))
-            shift_limit = float(cfg_get("shift_limit", 0.03))
-            scale_limit = float(cfg_get("scale_limit", 0.06))
-            rotate_limit = float(cfg_get("rotate_limit", 6))
-        else:
-            # icm/te
-            crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.85, 1.00)))
-            crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.95, 1.05)))
+        affine_p = float(cfg_get("affine_p", 0.35))
+        translate = float(cfg_get("translate_limit", 0.03))   # ~3%
+        scale = float(cfg_get("scale_limit", 0.05))           # ±5%
+        rotate = float(cfg_get("rotate_limit", 6))            # ±6 deg
 
-            vflip_p = float(cfg_get("vflip_p", 0.20))
-
-            ssr_p = float(cfg_get("ssr_p", 0.45))
-            shift_limit = float(cfg_get("shift_limit", 0.04))
-            scale_limit = float(cfg_get("scale_limit", 0.08))
-            rotate_limit = float(cfg_get("rotate_limit", 10))
-
-        # -------------------------
-        # Photometric (mild)
-        # -------------------------
+        # photometric: very mild
         color_jitter = bool(getattr(self, "color_jitter", False))
+        bc_p = float(cfg_get("brightness_contrast_p", 0.20))
+        b_lim = float(cfg_get("brightness_limit", 0.05))
+        c_lim = float(cfg_get("contrast_limit", 0.05))
 
-        brightness_contrast_p = float(cfg_get("brightness_contrast_p", 0.20 if task == "exp" else 0.25))
-        brightness_limit = float(cfg_get("brightness_limit", 0.06))
-        contrast_limit = float(cfg_get("contrast_limit", 0.06))
-
-        noise_p = float(cfg_get("noise_p", 0.12 if task == "exp" else 0.15))
-        noise_var = tuple(cfg_get("noise_var_limit", (2, 10)))
-
-        blur_p = float(cfg_get("blur_p", 0.12 if task == "exp" else 0.10))
-        blur_limit = tuple(cfg_get("blur_limit", (3, 3)))
-
-        # CLAHE (mild; mostly icm/te)
-        use_clahe = bool(cfg_get("use_clahe", False))
-        clahe_p = float(cfg_get("clahe_p", 0.0 if task == "exp" else 0.20))
+        # CLAHE: optional, mild
+        use_clahe = bool(cfg_get("use_clahe", True))
+        clahe_p = float(cfg_get("clahe_p", 0.15))
         clahe_clip = float(cfg_get("clahe_clip_limit", 2.0))
 
-        # CoarseDropout: OFF for EXP; light for icm/te if enabled
+        # Noise/blur: TE sensitive -> very low
+        noise_p = float(cfg_get("noise_p", 0.10))
+        # albumentations v2: use std_range (fraction of max) - keep tiny
+        noise_std_range = tuple(cfg_get("noise_std_range", (0.01, 0.03)))
+
+        blur_p = float(cfg_get("blur_p", 0.05))
+        blur_limit = tuple(cfg_get("blur_limit", (3, 3)))
+
+        # Dropout: usually OFF for TE; if enabled, extremely light
         use_dropout = bool(cfg_get("use_coarse_dropout", False))
-        dropout_p = 0.0 if task == "exp" else float(cfg_get("coarse_dropout_p", 0.10))
+        dropout_p = float(cfg_get("coarse_dropout_p", 0.05)) if use_dropout else 0.0
         max_holes = int(cfg_get("coarse_dropout_max_holes", 1))
-        max_frac = float(cfg_get("coarse_dropout_max_frac", 0.06))
+        max_frac = float(cfg_get("coarse_dropout_max_frac", 0.04))
 
         pipeline = [
-            # ✅ albumentations v2: use size=(H,W), NOT height/width
             A.RandomResizedCrop(
                 size=(img, img),
                 scale=crop_scale,
                 ratio=crop_ratio,
                 interpolation=cv2.INTER_LINEAR,
             ),
-
-            A.HorizontalFlip(p=0.5),
+            A.HorizontalFlip(p=hflip_p),
             A.VerticalFlip(p=vflip_p),
 
-            A.ShiftScaleRotate(
-                shift_limit=shift_limit,
-                scale_limit=scale_limit,
-                rotate_limit=rotate_limit,
-                p=ssr_p,
+            # ✅ Replace ShiftScaleRotate with Affine (v2 recommended)
+            A.Affine(
+                translate_percent={"x": (-translate, translate), "y": (-translate, translate)},
+                scale=(1 - scale, 1 + scale),
+                rotate=(-rotate, rotate),
                 interpolation=cv2.INTER_LINEAR,
-                border_mode=cv2.BORDER_CONSTANT,
-                value=0,
+                mode=cv2.BORDER_CONSTANT,
+                cval=0,
+                p=affine_p,
             ),
 
             A.RandomBrightnessContrast(
-                brightness_limit=brightness_limit,
-                contrast_limit=contrast_limit,
-                p=brightness_contrast_p if color_jitter else 0.0
+                brightness_limit=b_lim,
+                contrast_limit=c_lim,
+                p=bc_p if color_jitter else 0.0
             ),
 
             A.CLAHE(clip_limit=clahe_clip, p=clahe_p) if use_clahe else A.NoOp(),
 
-            A.GaussNoise(var_limit=noise_var, p=noise_p),
+            # ✅ GaussNoise v2: std_range (no var_limit)
+            A.GaussNoise(std_range=noise_std_range, p=noise_p),
+
             A.GaussianBlur(blur_limit=blur_limit, p=blur_p),
 
             A.CoarseDropout(
@@ -216,12 +203,11 @@ class GardnerDataset(Dataset):
                 max_width=int(img * max_frac),
                 fill_value=0,
                 p=dropout_p,
-            ) if (use_dropout and dropout_p > 0) else A.NoOp(),
+            ) if dropout_p > 0 else A.NoOp(),
 
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ]
-
         return A.Compose(pipeline)
 
 
