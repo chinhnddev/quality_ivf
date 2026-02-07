@@ -213,7 +213,7 @@ class GardnerDataset(Dataset):
         resize_size = int(getattr(self, "resize_size", 256))
 
         return A.Compose([
-            A.Resize(resize_size, resize_size, interpolation=cv2.INTER_LINEAR),
+            A.Resize(resize_size, resize_size),
             A.CenterCrop(img, img),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
@@ -235,10 +235,8 @@ class GardnerDataset(Dataset):
         img_name = self.images[idx]
         img_path = os.path.join(self.img_dir, img_name)
         image = Image.open(img_path).convert("RGB")
-        if self.split == "train" and self.augment and not self.sanity_mode:
-            image = self.transform(image=np.asarray(image))["image"]
-        else:
-            image = self.transform(image)
+        image_arr = np.asarray(image)
+        image = self.transform(image=image_arr)["image"]
 
         label = self.labels[idx]
         label_raw = self.labels_raw[idx]
