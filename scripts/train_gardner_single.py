@@ -550,6 +550,8 @@ def train_one_run(cfg, args) -> None:
     best_metric = -1.0
     best_path = out_dir / "best.ckpt"
     metrics_val_path = out_dir / "metrics_val.json"
+    monitor_metric = cfg.monitor.metric if hasattr(cfg, 'monitor') and hasattr(cfg.monitor, 'metric') else "macro_f1"
+    best_epoch = -1
 
     # Sanity overfit test (optional)
     if args.sanity_overfit:
@@ -734,7 +736,6 @@ def train_one_run(cfg, args) -> None:
 
         # val
         val_metrics = evaluate_on_val(model, dl_val, device, use_coral, verbose=(epoch == epochs or epoch % 10 == 0), task=task)
-        monitor_metric = cfg.monitor.metric if hasattr(cfg, 'monitor') and hasattr(cfg.monitor, 'metric') else "macro_f1"
         monitor = val_metrics[monitor_metric]  # align with cfg.monitor.metric if you prefer parsing it
         print(f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f} | "
               f"val_acc={val_metrics['acc']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
@@ -743,13 +744,14 @@ def train_one_run(cfg, args) -> None:
         # save best
         if monitor > best_metric:
             best_metric = monitor
+            best_epoch = epoch
             torch.save({"state_dict": model.state_dict(),
                         "task": task, "track": track,
                         "num_classes": num_classes,
                         "label_col": label_col}, best_path)
             with open(metrics_val_path, "w", encoding="utf-8") as f:
                 json.dump({"best_epoch": epoch, "best_val": val_metrics}, f, indent=2)
-            print(f"  ✓ Saved best to {best_path} (monitor={best_metric:.4f})")
+            print(f"  ✓ Saved best to {best_path} ({monitor_metric}={best_metric:.4f})")
         if use_swa and epoch >= swa_start_epoch:
             swa_model.update_parameters(model)
             swa_scheduler.step()
@@ -794,8 +796,8 @@ def train_one_run(cfg, args) -> None:
     # Write debug report
     debug_report_path = out_dir / "debug_report.txt"
     with open(debug_report_path, "w") as f:
-        f.write(f"Best epoch: {best_metric}\n")
-        f.write(f"Best val_macro_f1: {best_metric:.4f}\n")
+        f.write(f"Best epoch: {best_epoch}\n")
+        f.write(f"Best val {monitor_metric}: {best_metric:.4f}\n")
         f.write(f"y_pred distribution at best epoch: {val_metrics['y_pred_counts']}\n")
         f.write(f"y_true distribution at best epoch: {val_metrics.get('y_true_counts', 'N/A')}\n")
         f.write(f"Confusion matrix at best epoch:\n{np.array(val_metrics.get('confusion_matrix', []))}\n")
@@ -817,7 +819,7 @@ def train_one_run(cfg, args) -> None:
         if max_ratio > 0.8:
             f.write("Likely majority-class collapse due to imbalance. Recommend enabling WeightedRandomSampler or stronger class reweighting; reduce label_smoothing; reduce warmup.\n")
 
-    print(f"\nDone. Best val macro_f1 = {best_metric:.4f}")
+    print(f"\nDone. Best val {monitor_metric} = {best_metric:.4f}")
     print(f"Artifacts: {out_dir}")
     print(f"Debug report: {debug_report_path}")
     if use_swa:
