@@ -138,29 +138,26 @@ class GardnerDataset(Dataset):
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.Rotate(limit=rotation_limit, p=0.7),
-            A.ShiftScaleRotate(  # Thêm nhẹ để simulate misalignment
-                shift_limit=0.05,
-                scale_limit=0.1,
-                rotate_limit=10,
+            A.Affine(
+                translate_percent=0.05,
+                scale=(0.95, 1.05),
+                rotate=10,
                 p=0.5,
             ),
             A.CLAHE(clip_limit=clahe_clip, p=0.7),  # Enhance ICM/TE cell contrast
             A.GaussNoise(p=gauss_noise_p),  # Microscope noise nhẹ
             A.GaussianBlur(blur_limit=(3, 5), p=0.3),
-            A.Cutout(  # RandomErasing-like, che small regions
-                num_holes=4,
-                max_h_size=int(self.image_size * 0.08),
-                max_w_size=int(self.image_size * 0.08),
-                fill_value=0,
-                p=0.4,
-            ),
-            # Optional: light color nếu ảnh có variation
-            A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.3)
-            if self.color_jitter
-            else A.NoOp(),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2(),
         ]
+        if self.color_jitter:
+            pipeline.append(
+                A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.3)
+            )
+        pipeline.extend(
+            [
+                A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ToTensorV2(),
+            ]
+        )
         return A.Compose(pipeline)
 
     def _build_eval_transform(self):
