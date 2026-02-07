@@ -96,8 +96,7 @@ class GardnerDataset(Dataset):
             elif self.task == "icm":
                 df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
             else:  # te
-                df = df[df["norm_label"].isin({"0", "1", "2", "ND"})].copy()
-                df.loc[df["norm_label"] == "ND", "norm_label"] = "3"
+                df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
         df = df.reset_index(drop=True)
 
         self.df = df
@@ -181,8 +180,6 @@ class GardnerDataset(Dataset):
                 width=img,
                 scale=crop_scale,
                 ratio=crop_ratio,
-                interpolation=A.Interpolation.BILINEAR,
-                antialias=True,
             ),
 
             # Flips
@@ -195,7 +192,6 @@ class GardnerDataset(Dataset):
                 scale_limit=scale_limit,
                 rotate_limit=rotate_limit,
                 p=ssr_p,
-                interpolation=A.Interpolation.BILINEAR,
                 border_mode=0,  # constant
                 value=0,
             ),
