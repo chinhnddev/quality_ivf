@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.loss_coral import coral_loss, coral_predict_class
 from src.losses import get_loss_fn, compute_class_weights
 from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_distribution
+from src.dataset_augmented import GardnerDatasetAugmented
 
 
 # =========================
@@ -390,43 +391,92 @@ def train_one_run(cfg, args) -> None:
     # Build datasets (train/val filtered properly)
     # If sanity test is requested, create datasets with sanity_mode=True (deterministic transforms)
     sanity_mode = bool(args.sanity_overfit)
-    ds_train = GardnerDataset(
-        csv_path=train_csv,
-        images_root=images_root,
-        task=task,
-        split="train",
-        image_col=cfg.data.image_col if "data" in cfg else "Image",
-        label_col=label_col,
-        image_size=int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size),
-        augmentation_cfg=cfg.augmentation if "augmentation" in cfg else {},
-        sanity_mode=sanity_mode,
-    )
-    ds_val = GardnerDataset(
-        csv_path=val_csv,
-        images_root=images_root,
-        task=task,
-        split="val",
-        image_col=cfg.data.image_col if "data" in cfg else "Image",
-        label_col=label_col,
-        image_size=int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size),
-        augmentation_cfg=cfg.augmentation if "augmentation" in cfg else {},
-        sanity_mode=False,
-    )
+    
+    # Check if we should use Albumentations
+    use_albumentations = bool(getattr(args, 'use_albumentations', 1))
+    selective_augmentation = bool(getattr(args, 'selective_augmentation', 0))
+    
+    if use_albumentations:
+        print(f"\n[AUGMENTATION] Using Albumentations-based augmentation")
+        print(f"[AUGMENTATION] Selective augmentation: {selective_augmentation}")
+        
+        # Build augmentation factors for selective augmentation
+        augment_factors = None
+        if selective_augmentation:
+            augment_factors = {
+                0: int(getattr(args, 'augment_factor_class0', 1)),
+                1: int(getattr(args, 'augment_factor_class1', 2)),
+                2: int(getattr(args, 'augment_factor_class2', 5)),
+            }
+            print(f"[AUGMENTATION] Augmentation factors: {augment_factors}")
+        
+        # Create augmented datasets
+        ds_train = GardnerDatasetAugmented(
+            csv_path=str(train_csv),
+            img_dir=str(images_root),
+            task=task,
+            split="train",
+            selective_augmentation=selective_augmentation,
+            augment_factors=augment_factors,
+            img_size=int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size),
+        )
+        
+        ds_val = GardnerDatasetAugmented(
+            csv_path=str(val_csv),
+            img_dir=str(images_root),
+            task=task,
+            split="val",
+            selective_augmentation=False,  # Never augment validation
+            augment_factors=None,
+            img_size=int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size),
+        )
+    else:
+        # Fallback to original PyTorch transforms
+        print(f"\n[AUGMENTATION] Using original PyTorch transforms")
+        
+        ds_train = GardnerDataset(
+            csv_path=train_csv,
+            images_root=images_root,
+            task=task,
+            split="train",
+            image_col=cfg.data.image_col if "data" in cfg else "Image",
+            label_col=label_col,
+            image_size=int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size),
+            augmentation_cfg=cfg.augmentation if "augmentation" in cfg else {},
+            sanity_mode=sanity_mode,
+        )
+        ds_val = GardnerDataset(
+            csv_path=val_csv,
+            images_root=images_root,
+            task=task,
+            split="val",
+            image_col=cfg.data.image_col if "data" in cfg else "Image",
+            label_col=label_col,
+            image_size=int(cfg.data.image_size) if "data" in cfg else int(cfg.image_size),
+            augmentation_cfg=cfg.augmentation if "augmentation" in cfg else {},
+            sanity_mode=False,
+        )
 
     print("train_size=", len(ds_train), "val_size=", len(ds_val))
     print("num_classes=", num_classes)
 
     # Collect train labels (after filtering) for class weights
-    train_labels = [int(ds_train.df["norm_label"].iloc[i]) for i in range(len(ds_train.df))]
+    if use_albumentations:
+        # GardnerDatasetAugmented stores labels in samples list
+        train_labels = [sample['label'] for sample in ds_train.samples]
+    else:
+        # Original GardnerDataset stores labels in df
+        train_labels = [int(ds_train.df["norm_label"].iloc[i]) for i in range(len(ds_train.df))]
 
-    # Log class distribution
-    from collections import Counter
-    label_counts = Counter(train_labels)
-    print(f"\nTrain label distribution (task={task}):")
-    for cls in sorted(label_counts.keys()):
-        count = label_counts[cls]
-        pct = 100.0 * count / len(train_labels)
-        print(f"  Class {cls}: {count} samples ({pct:.1f}%)")
+    # Log class distribution (skip if already printed by GardnerDatasetAugmented)
+    if not use_albumentations:
+        from collections import Counter
+        label_counts = Counter(train_labels)
+        print(f"\nTrain label distribution (task={task}):")
+        for cls in sorted(label_counts.keys()):
+            count = label_counts[cls]
+            pct = 100.0 * count / len(train_labels)
+            print(f"  Class {cls}: {count} samples ({pct:.1f}%)")
 
     # Define flags early
     use_class_weights = bool(cfg.use_class_weights)
@@ -1004,6 +1054,18 @@ def main():
 
     parser.add_argument("--pretrain_ckpt", type=str, default="",
                         help="Path to stage-pretrain best.ckpt for backbone initialization.")
+    
+    # Albumentations augmentation arguments
+    parser.add_argument("--use_albumentations", type=int, default=1, choices=[0, 1],
+                        help="Use Albumentations-based augmentation (0=OFF, 1=ON). Default: 1")
+    parser.add_argument("--selective_augmentation", type=int, default=0, choices=[0, 1],
+                        help="Enable selective class-balanced augmentation (0=OFF, 1=ON). Default: 0")
+    parser.add_argument("--augment_factor_class0", type=int, default=1,
+                        help="Augmentation factor for class 0 (majority class). Default: 1")
+    parser.add_argument("--augment_factor_class1", type=int, default=2,
+                        help="Augmentation factor for class 1 (medium class). Default: 2")
+    parser.add_argument("--augment_factor_class2", type=int, default=5,
+                        help="Augmentation factor for class 2 (minority class). Default: 5")
 
     args = parser.parse_args()
 
