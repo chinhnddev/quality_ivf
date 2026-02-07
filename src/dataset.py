@@ -179,11 +179,8 @@ class GardnerDataset(Dataset):
                 scale=(1 - scale, 1 + scale),
                 rotate=(-rotate, rotate),
                 interpolation=cv2.INTER_LINEAR,
-                mode=cv2.BORDER_CONSTANT,
-                cval=0,
                 p=affine_p,
             ),
-
             A.RandomBrightnessContrast(
                 brightness_limit=b_lim,
                 contrast_limit=c_lim,

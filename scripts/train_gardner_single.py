@@ -544,7 +544,8 @@ def train_one_run(cfg, args) -> None:
     thr_step = float(getattr(coral_cfg, "thr_step", 0.01))
     print(f"LR schedule: cosine with warmup_epochs={warmup_epochs} warmup_lr={warmup_lr:.6f}")
     print(f"SWA: use={use_swa} start_epoch={swa_start_epoch} swa_lr={swa_lr}")
-    print(f"CORAL tuning: enabled={tune_coral_thr} grid=[{thr_min},{thr_max}] step={thr_step}")
+    if use_coral:
+        print(f"CORAL tuning: enabled={tune_coral_thr} grid=[{thr_min},{thr_max}] step={thr_step}")
 
     best_metric = -1.0
     best_path = out_dir / "best.ckpt"
