@@ -150,11 +150,18 @@ class GardnerDataset(Dataset):
         if clahe_p > 0:
             pipeline.append(A.CLAHE(clip_limit=3.0, p=clahe_p))
         if gauss_noise_p > 0:
-            pipeline.append(A.GaussNoise(var_limit=(10, 30), p=gauss_noise_p))
+            pipeline.append(A.GaussNoise(p=gauss_noise_p))
         if gaussian_blur_p > 0:
             pipeline.append(A.GaussianBlur(blur_limit=(3, 5), p=gaussian_blur_p))
         if random_erasing_p > 0:
-            pipeline.append(A.RandomErasing(p=random_erasing_p, scale=(0.02, 0.1)))
+            pipeline.append(
+                A.CoarseDropout(
+                    max_holes=1,
+                    max_height=int(self.image_size * 0.1),
+                    max_width=int(self.image_size * 0.1),
+                    p=random_erasing_p,
+                )
+            )
         pipeline.extend(
             [
                 A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
