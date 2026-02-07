@@ -144,29 +144,33 @@ class GardnerDataset(Dataset):
                 p=0.5,
             ),
             A.CLAHE(clip_limit=clahe_clip, p=0.7),  # Enhance ICM/TE cell contrast
-            A.GaussNoise(var_limit=(5, 20), p=0.3),  # Microscope noise nhẹ
+            A.GaussNoise(p=gauss_noise_p),  # Microscope noise nhẹ
             A.GaussianBlur(blur_limit=(3, 5), p=0.3),
-            A.CoarseDropout(  # RandomErasing-like, che small regions
-                max_holes=4,
-                max_height=int(self.image_size * 0.08),
-                max_width=int(self.image_size * 0.08),
+            A.Cutout(  # RandomErasing-like, che small regions
+                num_holes=4,
+                max_h_size=int(self.image_size * 0.08),
+                max_w_size=int(self.image_size * 0.08),
                 fill_value=0,
                 p=0.4,
             ),
             # Optional: light color nếu ảnh có variation
-            A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.3) if self.color_jitter else A.NoOp(),
+            A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.3)
+            if self.color_jitter
+            else A.NoOp(),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ]
         return A.Compose(pipeline)
 
     def _build_eval_transform(self):
-        return A.Compose([
-            A.Resize(self.image_size, self.image_size),
-            A.CenterCrop(self.image_size, self.image_size),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2(),
-        ])
+        return transforms.Compose(
+            [
+                transforms.Resize(self.image_size),
+                transforms.CenterCrop(self.image_size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
+        )
     def _cfg_get(self, key, default):
         cfg = self.augmentation_cfg
         if cfg is None:
