@@ -161,63 +161,55 @@ class GardnerDataset(Dataset):
         contrast_limit = float(cfg_get("contrast_limit", 0.06))
 
         noise_p = float(cfg_get("noise_p", 0.12 if task == "exp" else 0.15))
+        noise_var = tuple(cfg_get("noise_var_limit", (2, 10)))
 
         blur_p = float(cfg_get("blur_p", 0.12 if task == "exp" else 0.10))
-        blur_limit = tuple(cfg_get("blur_limit", (3, 3)))  # stable mild blur
+        blur_limit = tuple(cfg_get("blur_limit", (3, 3)))
 
-        # CLAHE: only mild and mostly for icm/te
+        # CLAHE (mild; mostly icm/te)
         use_clahe = bool(cfg_get("use_clahe", False))
         clahe_p = float(cfg_get("clahe_p", 0.0 if task == "exp" else 0.20))
         clahe_clip = float(cfg_get("clahe_clip_limit", 2.0))
 
-        # CoarseDropout: OFF for EXP; very light for icm/te if enabled
+        # CoarseDropout: OFF for EXP; light for icm/te if enabled
         use_dropout = bool(cfg_get("use_coarse_dropout", False))
-        if task == "exp":
-            dropout_p = 0.0
-        else:
-            dropout_p = float(cfg_get("coarse_dropout_p", 0.10))  # much lighter than 0.4
-
+        dropout_p = 0.0 if task == "exp" else float(cfg_get("coarse_dropout_p", 0.10))
         max_holes = int(cfg_get("coarse_dropout_max_holes", 1))
         max_frac = float(cfg_get("coarse_dropout_max_frac", 0.06))
 
         pipeline = [
+            # ✅ albumentations v2: use size=(H,W), NOT height/width
             A.RandomResizedCrop(
                 size=(img, img),
                 scale=crop_scale,
                 ratio=crop_ratio,
-            ),
-                interpolation=cv2.INTER_LINEAR,  # ✅ FIX
+                interpolation=cv2.INTER_LINEAR,
             ),
 
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=vflip_p),
 
-            # ✅ Single geometry transform (no double rotation)
             A.ShiftScaleRotate(
                 shift_limit=shift_limit,
                 scale_limit=scale_limit,
                 rotate_limit=rotate_limit,
                 p=ssr_p,
+                interpolation=cv2.INTER_LINEAR,
                 border_mode=cv2.BORDER_CONSTANT,
                 value=0,
             ),
-            ),
 
-            # Mild brightness/contrast (optional)
             A.RandomBrightnessContrast(
                 brightness_limit=brightness_limit,
                 contrast_limit=contrast_limit,
                 p=brightness_contrast_p if color_jitter else 0.0
             ),
 
-            # Optional CLAHE (mild)
             A.CLAHE(clip_limit=clahe_clip, p=clahe_p) if use_clahe else A.NoOp(),
 
-            # Mild noise/blur
-            A.GaussNoise(p=noise_p)
+            A.GaussNoise(var_limit=noise_var, p=noise_p),
             A.GaussianBlur(blur_limit=blur_limit, p=blur_p),
 
-            # Optional very light dropout (NOT for EXP)
             A.CoarseDropout(
                 max_holes=max_holes,
                 max_height=int(img * max_frac),
@@ -235,15 +227,14 @@ class GardnerDataset(Dataset):
 
     def _build_eval_transform(self):
         img = int(self.image_size)
-        resize_size = int(getattr(self, "resize_size", 256))  # set self.resize_size=256 in config if you want
+        resize_size = int(getattr(self, "resize_size", 256))
 
         return A.Compose([
-            A.Resize(resize_size, resize_size, interpolation=cv2.INTER_LINEAR),  # ✅ FIX
+            A.Resize(resize_size, resize_size, interpolation=cv2.INTER_LINEAR),
             A.CenterCrop(img, img),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ])
-
     def _cfg_get(self, key, default):
         cfg = self.augmentation_cfg
         if cfg is None:
