@@ -161,7 +161,6 @@ class GardnerDataset(Dataset):
         contrast_limit = float(cfg_get("contrast_limit", 0.06))
 
         noise_p = float(cfg_get("noise_p", 0.12 if task == "exp" else 0.15))
-        noise_var = tuple(cfg_get("noise_var_limit", (2, 10)))  # realistic mild
 
         blur_p = float(cfg_get("blur_p", 0.12 if task == "exp" else 0.10))
         blur_limit = tuple(cfg_get("blur_limit", (3, 3)))  # stable mild blur
@@ -183,10 +182,10 @@ class GardnerDataset(Dataset):
 
         pipeline = [
             A.RandomResizedCrop(
-                height=img,
-                width=img,
+                size=(img, img),
                 scale=crop_scale,
                 ratio=crop_ratio,
+            ),
                 interpolation=cv2.INTER_LINEAR,  # ✅ FIX
             ),
 
@@ -199,9 +198,9 @@ class GardnerDataset(Dataset):
                 scale_limit=scale_limit,
                 rotate_limit=rotate_limit,
                 p=ssr_p,
-                interpolation=cv2.INTER_LINEAR,  # ✅ FIX
                 border_mode=cv2.BORDER_CONSTANT,
                 value=0,
+            ),
             ),
 
             # Mild brightness/contrast (optional)
@@ -215,7 +214,7 @@ class GardnerDataset(Dataset):
             A.CLAHE(clip_limit=clahe_clip, p=clahe_p) if use_clahe else A.NoOp(),
 
             # Mild noise/blur
-            A.GaussNoise(var_limit=noise_var, p=noise_p),
+            A.GaussNoise(p=noise_p)
             A.GaussianBlur(blur_limit=blur_limit, p=blur_p),
 
             # Optional very light dropout (NOT for EXP)
