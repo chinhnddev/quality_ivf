@@ -127,6 +127,7 @@ class GardnerDataset(Dataset):
         crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.95, 1.05)))  # Gần 1:1 cho embryo
         rotation_limit = float(cfg_get("rotation_deg", 20.0))  # Giảm nhẹ nếu cần
         clahe_clip = float(cfg_get("clahe_clip_limit", 2.5))  # Giảm để tránh over-enhance noise
+        gauss_noise_p = float(cfg_get("gauss_noise_prob", 0.3))
 
         pipeline = [
             A.RandomResizedCrop(
