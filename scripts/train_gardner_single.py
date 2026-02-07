@@ -16,10 +16,8 @@ import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 from sklearn.metrics import f1_score, accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
-from torchvision import transforms
-from PIL import Image
 
 ORDINAL_TASKS = {"exp"}  # Only EXP is truly ordinal (grades 1→2→3→4→5); ICM/TE are nominal
 
@@ -31,10 +29,13 @@ except ImportError:
 # Add parent directory to path to import src module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Import project datasets after ensuring src is on path
+from src.dataset import GardnerDataset
+
 # Import CORAL functions
 from src.loss_coral import coral_loss, coral_predict_class
 from src.losses import get_loss_fn, compute_class_weights
-from src.utils import normalize_exp_token, normalize_icm_te_token, print_label_distribution
+from src.utils import print_label_distribution
 
 
 # =========================
@@ -74,115 +75,6 @@ def set_seed(seed: int, deterministic: bool = True) -> None:
 
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
-
-
-# =========================
-# Dataset
-# =========================
-
-class GardnerDataset(Dataset):
-    def __init__(
-        self,
-        csv_path: Path,
-        images_root: Path,
-        task: str,
-        split: str,
-        image_col: str = "Image",
-        label_col: str = "EXP",
-        image_size: int = 224,
-        augmentation_cfg: Optional[dict] = None,
-        sanity_mode: bool = False,
-    ):
-        self.csv_path = csv_path
-        self.images_root = images_root
-        self.task = task
-        self.split = split
-        self.image_col = image_col
-        self.label_col = label_col
-        self.image_size = image_size
-        self.sanity_mode = sanity_mode
-
-        df = pd.read_csv(csv_path)
-        if image_col not in df.columns or label_col not in df.columns:
-            raise ValueError(f"CSV missing required columns. Need {image_col} and {label_col}. Got: {df.columns.tolist()}")
-
-        df["Image"] = df["Image"].astype(str).str.strip()
-        if label_col == "EXP":
-            df["norm_label"] = df["EXP"].apply(normalize_exp_token)
-        else:
-            df["norm_label"] = df[label_col].apply(normalize_icm_te_token)
-
-        # Filtering rule:
-        # - train/val: filter for ICM/TE valid labels {0,1,2}; EXP keeps all
-        # - test: do NOT filter (load all); masking is for eval script
-        if split in {"train", "val"}:
-            if label_col == "EXP":
-                df = df[df["norm_label"].isin({"0", "1", "2", "3", "4"})].copy()
-            else:
-                if task.lower() == "icm":
-                    df = df[df["norm_label"].isin({"0", "1", "2"})].copy()
-                else:
-                    df = df[df["norm_label"].isin({"0", "1", "2", "ND"})].copy()
-                    df.loc[df["norm_label"] == "ND", "norm_label"] = "3"
-        elif split == "test":
-            pass
-        else:
-            raise ValueError(f"Unknown split: {split}")
-
-        self.df = df.reset_index(drop=True)
-
-        # Transforms
-        self.transform = self._build_transform(augmentation_cfg, sanity_mode)
-        
-    def _build_transform(self, aug: Optional[dict], sanity_mode: bool = False):
-        if self.split == "train" and not sanity_mode:
-            transform = transforms.Compose([
-                transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1)),                
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomVerticalFlip(p=0.5),
-                transforms.RandomRotation(degrees=15),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ])
-            print(f"TRAIN transform pipeline: {transform}")
-            return transform
-
-        # val/test/sanity: deterministic
-        if sanity_mode:
-            transform = transforms.Compose([
-                transforms.Resize(224),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ])
-            print(f"SANITY transform pipeline: {transform}")
-            return transform
-        else:
-            transform = transforms.Compose([
-                transforms.Resize(224),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ])
-            print(f"VAL/TEST transform pipeline: {transform}")
-            return transform
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx: int):
-        row = self.df.iloc[idx]
-        img_name = row[self.image_col]
-        img_path = self.images_root / img_name
-        if not img_path.exists():
-            raise FileNotFoundError(f"Image not found: {img_path}")
-
-        img = Image.open(img_path).convert("RGB")
-        x = self.transform(img)
-
-        y = int(row["norm_label"])
-
-        return x, y, img_name
 
 
 # =========================
@@ -392,7 +284,7 @@ def train_one_run(cfg, args) -> None:
     sanity_mode = bool(args.sanity_overfit)
     ds_train = GardnerDataset(
         csv_path=train_csv,
-        images_root=images_root,
+        img_dir=images_root,
         task=task,
         split="train",
         image_col=cfg.data.image_col if "data" in cfg else "Image",
@@ -403,7 +295,7 @@ def train_one_run(cfg, args) -> None:
     )
     ds_val = GardnerDataset(
         csv_path=val_csv,
-        images_root=images_root,
+        img_dir=images_root,
         task=task,
         split="val",
         image_col=cfg.data.image_col if "data" in cfg else "Image",
@@ -452,8 +344,6 @@ def train_one_run(cfg, args) -> None:
     print(f"  use_weighted_sampler={use_weighted_sampler}")
     if task == "exp":
         print(f"  label_smoothing={applied_smoothing}")
-    else:
-        print(f"  focal_gamma=2.0")
 
     # WeightedRandomSampler setup and logging at startup
     sampler = None
@@ -608,10 +498,6 @@ def train_one_run(cfg, args) -> None:
         effective_label_smoothing = label_smoothing_cfg
         if task == "exp" and (use_weighted_sampler or sanity_mode):
             effective_label_smoothing = 0.0
-        focal_gamma_cfg = getattr(cfg.loss, "focal_gamma", 2.0)
-        if focal_gamma_cfg is None:
-            focal_gamma_cfg = 2.0
-        focal_gamma_cfg = float(focal_gamma_cfg)
         loss_fn = get_loss_fn(
             track=track,
             task=task,
@@ -619,7 +505,6 @@ def train_one_run(cfg, args) -> None:
             train_labels=train_labels,
             use_class_weights=use_class_weights,
             label_smoothing=effective_label_smoothing,
-            focal_gamma=focal_gamma_cfg,
         )
         loss_name = loss_fn.__class__.__name__
     print(f"  loss_fn={loss_name}")

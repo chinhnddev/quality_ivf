@@ -4,7 +4,6 @@ Loss utilities for Gardner EXP / ICM / TE experiments.
 Supported:
 - CrossEntropyLoss (optionally with class weights)
 - CrossEntropyLoss with label smoothing (EXP improved)
-- Focal Loss with alpha (ICM/TE improved)
 - Effective Number of Samples weighting (better for extreme imbalance)
 
 IMPORTANT RULES
@@ -17,7 +16,6 @@ from typing import Iterable, Optional, List
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 # ------------------------------------------------------------
@@ -140,51 +138,6 @@ def compute_class_weights(
 # ------------------------------------------------------------
 # Focal loss with alpha
 # ------------------------------------------------------------
-class FocalLoss(nn.Module):
-    """
-    Multi-class focal loss with optional alpha class weights and ignore index.
-    """
-    def __init__(
-        self,
-        gamma: float = 2.0,
-        alpha: Optional[torch.Tensor] = None,
-        reduction: str = "mean",
-        ignore_index: int = 3
-    ):
-        super().__init__()
-        self.gamma = gamma
-        self.alpha = alpha
-        self.reduction = reduction
-        self.ignore_index = ignore_index
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        alpha = self.alpha
-        if alpha is not None and alpha.device != logits.device:
-            alpha = alpha.to(logits.device)
-            self.alpha = alpha
-
-        ce = F.cross_entropy(
-            logits,
-            targets,
-            weight=alpha,
-            ignore_index=self.ignore_index,
-            reduction="none"
-        )
-        pt = torch.exp(-ce)
-        focal_loss = ((1.0 - pt) ** self.gamma) * ce
-
-        if self.reduction == "mean":
-            mask = targets != self.ignore_index
-            if mask.sum() == 0:
-                return torch.tensor(0.0, device=logits.device)
-            return focal_loss[mask].mean()
-        elif self.reduction == "sum":
-            mask = targets != self.ignore_index
-            return focal_loss[mask].sum()
-        else:
-            return focal_loss
-
-
 # ------------------------------------------------------------
 # Loss factory
 # ------------------------------------------------------------
@@ -196,7 +149,6 @@ def get_loss_fn(
     train_labels: List[int],
     use_class_weights: bool,
     label_smoothing: float = 0.0,
-    focal_gamma: float = 2.0
 ) -> nn.Module:
     """
     Factory function to build the correct loss for a given task/track.
@@ -235,22 +187,9 @@ def get_loss_fn(
         return nn.CrossEntropyLoss(weight=weight)
 
     # -------------------------
-    # Improved track
+    # Improved track (now CrossEntropy everywhere)
     # -------------------------
     if track == "improved":
-        if task == "exp":
-            # EXP: CE + label smoothing (giá trị từ config, default 0.0)
-            return nn.CrossEntropyLoss(
-                weight=weight,
-                label_smoothing=label_smoothing
-            )
-        else:
-            # ICM / TE: Focal + alpha (class-balanced)
-            return FocalLoss(
-                gamma=focal_gamma,
-                alpha=weight,
-                reduction="mean",
-                ignore_index=3
-            )
+        return nn.CrossEntropyLoss(weight=weight, label_smoothing=label_smoothing)
 
     raise ValueError(f"Unknown track: {track}")

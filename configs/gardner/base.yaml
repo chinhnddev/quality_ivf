@@ -67,7 +67,6 @@ model:
 loss:
   name: cross_entropy
   label_smoothing: 0.0
-  focal_gamma: null
 
 # Class weighting (overridden by track config)
 use_class_weights: false
