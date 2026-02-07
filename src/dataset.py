@@ -126,47 +126,47 @@ class GardnerDataset(Dataset):
         task = getattr(self, "task", "exp")
         img = int(self.image_size)
 
-        # ----- EXP/ICM/TE: even milder geometry, stronger contrast/edge -----
-        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.88, 1.00)))  # Hẹp hơn nữa
-        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.98, 1.02)))  # Gần 1:1 cực kỳ
+        # ----- EXP: focus on scale/affine for cavity expansion simulation -----
+        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.8, 1.00)))  # Wider scale for expansion zoom
+        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.9, 1.1)))  # Moderate for shape
 
         hflip_p = float(cfg_get("hflip_p", 0.5))
         vflip_p = float(cfg_get("vflip_p", 0.3))
 
-        affine_p = float(cfg_get("affine_p", 0.5))  # Giữ vừa phải
-        translate = float(cfg_get("translate_limit", 0.04))   # Giảm xuống 4%
-        scale = float(cfg_get("scale_limit", 0.06))           # ±6%
-        rotate = float(cfg_get("rotate_limit", 12))           # ±12 deg
+        affine_p = float(cfg_get("affine_p", 0.7))  # Increase for mild distortion (hatching simulation)
+        translate = float(cfg_get("translate_limit", 0.05))   # ~5% shift
+        scale = float(cfg_get("scale_limit", 0.12))           # ±12% for cavity size variation
+        rotate = float(cfg_get("rotate_limit", 15))           # ±15 deg
 
-        # Photometric: tăng nhẹ contrast để highlight cavity/ICM/TE cells
-        bc_p = float(cfg_get("brightness_contrast_p", 0.4))
-        b_lim = float(cfg_get("brightness_limit", 0.08))
-        c_lim = float(cfg_get("contrast_limit", 0.12))  # Tăng contrast
+        # Photometric: moderate for boundary contrast
+        bc_p = float(cfg_get("brightness_contrast_p", 0.45))
+        b_lim = float(cfg_get("brightness_limit", 0.1))
+        c_lim = float(cfg_get("contrast_limit", 0.15))  # Slightly higher for cavity edges
 
-        # CLAHE: tăng p và clip nhẹ
+        # CLAHE: high p for expansion boundaries
         use_clahe = bool(cfg_get("use_clahe", True))
         clahe_p = float(cfg_get("clahe_p", 0.85))
-        clahe_clip = float(cfg_get("clahe_clip_limit", 2.2))  # Giảm nhẹ nếu artifacts
+        clahe_clip = float(cfg_get("clahe_clip_limit", 2.5))
 
-        # Noise/blur: giữ low
-        noise_p = float(cfg_get("noise_p", 0.2))
-        noise_std_range = tuple(cfg_get("noise_std_range", (0.015, 0.035)))
+        # Noise/blur: moderate for microscope robustness
+        noise_p = float(cfg_get("noise_p", 0.3))
+        noise_std_range = tuple(cfg_get("noise_std_range", (0.02, 0.06)))  # Increase for variation
 
-        blur_p = float(cfg_get("blur_p", 0.12))
-        blur_limit = tuple(cfg_get("blur_limit", (3, 4)))
+        blur_p = float(cfg_get("blur_p", 0.2))
+        blur_limit = tuple(cfg_get("blur_limit", (3, 5)))
 
-        # Dropout: light hơn
+        # Dropout: moderate for occlusion (e.g., artifacts covering cavity)
         use_dropout = bool(cfg_get("use_coarse_dropout", True))
-        dropout_p = float(cfg_get("coarse_dropout_p", 0.25)) if use_dropout else 0.0
-        max_holes = int(cfg_get("coarse_dropout_max_holes", 1))
-        max_frac = float(cfg_get("coarse_dropout_max_frac", 0.04))
+        dropout_p = float(cfg_get("coarse_dropout_p", 0.4)) if use_dropout else 0.0
+        max_holes = int(cfg_get("coarse_dropout_max_holes", 2))
+        max_frac = float(cfg_get("coarse_dropout_max_frac", 0.05))
 
         pipeline = [
             A.RandomResizedCrop(
                 size=(img, img),
                 scale=crop_scale,
                 ratio=crop_ratio,
-                interpolation=2,
+                interpolation=2,  # cv2.INTER_LINEAR
             ),
             A.HorizontalFlip(p=hflip_p),
             A.VerticalFlip(p=vflip_p),
