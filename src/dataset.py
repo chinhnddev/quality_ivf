@@ -123,52 +123,124 @@ class GardnerDataset(Dataset):
 
     def _build_train_transform(self):
         cfg_get = self._cfg_get
-        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.85, 1.0)))  # Hẹp hơn để giữ phôi
-        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.95, 1.05)))  # Gần 1:1 cho embryo
-        rotation_limit = float(cfg_get("rotation_deg", 20.0))  # Giảm nhẹ nếu cần
-        clahe_clip = float(cfg_get("clahe_clip_limit", 2.5))  # Giảm để tránh over-enhance noise
-        gauss_noise_p = float(cfg_get("gauss_noise_prob", 0.3))
+
+        task = getattr(self, "task", "exp")  # "exp" | "icm" | "te"
+        img = self.image_size
+
+        # ---------- Common safe geometry ----------
+        # EXP: giữ hình học ổn định hơn (crop hẹp hơn)
+        if task == "exp":
+            crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.90, 1.00)))
+            crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.98, 1.02)))
+            # EXP: xoay/biến dạng rất nhẹ
+            ssr_p = float(cfg_get("ssr_p", 0.35))
+            shift_limit = float(cfg_get("shift_limit", 0.03))
+            scale_limit = float(cfg_get("scale_limit", 0.06))
+            rotate_limit = float(cfg_get("rotate_limit", 6))
+            vflip_p = float(cfg_get("vflip_p", 0.10))
+        else:
+            # ICM/TE có thể chịu geometry mạnh hơn một chút
+            crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.85, 1.00)))
+            crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.95, 1.05)))
+            ssr_p = float(cfg_get("ssr_p", 0.45))
+            shift_limit = float(cfg_get("shift_limit", 0.04))
+            scale_limit = float(cfg_get("scale_limit", 0.08))
+            rotate_limit = float(cfg_get("rotate_limit", 10))
+            vflip_p = float(cfg_get("vflip_p", 0.20))
+
+        # ---------- Photometric (keep mild) ----------
+        # IVF ảnh thường có ánh sáng khác nhau nhẹ, nhưng đừng jitter mạnh.
+        brightness_contrast_p = float(cfg_get("brightness_contrast_p", 0.20 if task == "exp" else 0.25))
+        brightness_limit = float(cfg_get("brightness_limit", 0.06))
+        contrast_limit = float(cfg_get("contrast_limit", 0.06))
+
+        # Noise/blur: realistic & mild
+        noise_p = float(cfg_get("noise_p", 0.12 if task == "exp" else 0.15))
+        noise_var = tuple(cfg_get("noise_var_limit", (2, 10)))  # nhẹ hơn nhiều so với (5,20)
+
+        blur_p = float(cfg_get("blur_p", 0.12 if task == "exp" else 0.10))
+        blur_limit = tuple(cfg_get("blur_limit", (3, 3)))  # blur 3x3 nhẹ, ổn định
+
+        # CLAHE: chỉ nên dùng nhẹ cho ICM/TE, EXP thì hạn chế
+        use_clahe = bool(cfg_get("use_clahe", False))
+        clahe_p = float(cfg_get("clahe_p", 0.0 if task == "exp" else 0.20))
+        clahe_clip = float(cfg_get("clahe_clip_limit", 2.0))
+
+        # CoarseDropout: EXP nên tắt; ICM/TE nếu dùng thì rất nhẹ
+        use_dropout = bool(cfg_get("use_coarse_dropout", False))
+        if task == "exp":
+            dropout_p = 0.0
+        else:
+            dropout_p = float(cfg_get("coarse_dropout_p", 0.10))  # giảm mạnh so với 0.4
+        max_holes = int(cfg_get("coarse_dropout_max_holes", 1))
+        max_frac = float(cfg_get("coarse_dropout_max_frac", 0.06))  # vùng che nhỏ hơn
 
         pipeline = [
             A.RandomResizedCrop(
-                size=(self.image_size, self.image_size),
+                height=img,
+                width=img,
                 scale=crop_scale,
                 ratio=crop_ratio,
+                interpolation=A.Interpolation.BILINEAR,
+                antialias=True,
             ),
+
+            # Flips
             A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
-            A.Rotate(limit=rotation_limit, p=0.7),
-            A.Affine(
-                translate_percent=0.05,
-                scale=(0.95, 1.05),
-                rotate=10,
-                p=0.5,
+            A.VerticalFlip(p=vflip_p),
+
+            # SINGLE geometry transform (no double rotation)
+            A.ShiftScaleRotate(
+                shift_limit=shift_limit,
+                scale_limit=scale_limit,
+                rotate_limit=rotate_limit,
+                p=ssr_p,
+                interpolation=A.Interpolation.BILINEAR,
+                border_mode=0,  # constant
+                value=0,
             ),
-            A.CLAHE(clip_limit=clahe_clip, p=0.7),  # Enhance ICM/TE cell contrast
-            A.GaussNoise(p=gauss_noise_p),  # Microscope noise nhẹ
-            A.GaussianBlur(blur_limit=(3, 5), p=0.3),
+
+            # Mild photometric
+            A.RandomBrightnessContrast(
+                brightness_limit=brightness_limit,
+                contrast_limit=contrast_limit,
+                p=brightness_contrast_p if getattr(self, "color_jitter", False) else 0.0
+            ),
+
+            # Optional: CLAHE (mild, mostly for ICM/TE)
+            A.CLAHE(clip_limit=clahe_clip, p=clahe_p) if use_clahe else A.NoOp(),
+
+            # Noise / Blur (mild)
+            A.GaussNoise(var_limit=noise_var, p=noise_p),
+            A.GaussianBlur(blur_limit=blur_limit, p=blur_p),
+
+            # Optional: very light dropout (NOT for EXP)
+            A.CoarseDropout(
+                max_holes=max_holes,
+                max_height=int(img * max_frac),
+                max_width=int(img * max_frac),
+                fill_value=0,
+                p=dropout_p,
+            ) if use_dropout and dropout_p > 0 else A.NoOp(),
+
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2(),
         ]
-        if self.color_jitter:
-            pipeline.append(
-                A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.3)
-            )
-        pipeline.extend(
-            [
-                A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-                ToTensorV2(),
-            ]
-        )
+
         return A.Compose(pipeline)
 
+
     def _build_eval_transform(self):
-        return transforms.Compose(
-            [
-                transforms.Resize(self.image_size),
-                transforms.CenterCrop(self.image_size),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ]
-        )
+        img = self.image_size
+        # chuẩn hơn: resize lớn hơn rồi center crop về img
+        resize_size = int(getattr(self, "resize_size", 256))  # bạn có thể set = 256 trong config
+
+        return A.Compose([
+            A.Resize(resize_size, resize_size, interpolation=A.Interpolation.BILINEAR),
+            A.CenterCrop(img, img),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2(),
+        ])
     def _cfg_get(self, key, default):
         cfg = self.augmentation_cfg
         if cfg is None:
