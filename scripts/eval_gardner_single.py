@@ -176,7 +176,14 @@ def main():
     parser.add_argument("--num_workers", type=int, default=2)  # safer on colab
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_strict", action="store_true")
-    parser.add_argument("--use_coral", type=int, default=0)
+    parser.add_argument(
+        "--use_coral",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="When explicitly set, force (1) or disable (0) CORAL decoding. "
+        "If omitted, the script will auto-detect CORAL checkpoints and enable them automatically."
+    )
     parser.add_argument("--coral_thr", "--coral_threshold", dest="coral_thr", type=float, default=None,
                         help=f"Uniform CORAL threshold for EXP (default {DEFAULT_CORAL_THR}). "
                              f"(alias --coral_threshold retained for scripts expecting the old flag)")
@@ -215,14 +222,20 @@ def main():
     train_num_classes = 5 if args.task == "exp" else 3
 
     # CORAL auto-detect for EXP
-    use_coral_flag = bool(args.use_coral)
+    explicit_coral = args.use_coral is not None
+    use_coral_flag = bool(args.use_coral) if explicit_coral else False
     state_dict = load_state_dict_robust(args.checkpoint, device)
     if "head.4.weight" in state_dict:
         out_dim = state_dict["head.4.weight"].shape[0]
         inferred_coral = (out_dim == train_num_classes - 1)
-        if not use_coral_flag and inferred_coral:
+        if not explicit_coral and inferred_coral:
             print(f"[INFO] Checkpoint has {out_dim} outputs; auto-enabling CORAL")
             use_coral_flag = True
+        elif explicit_coral and inferred_coral and not use_coral_flag:
+            print(
+                f"[INFO] Checkpoint looks like CORAL (out_dim={out_dim}) "
+                f"but --use_coral=0 was provided. Running without CORAL decoding."
+            )
 
     user_provided_thr = args.coral_thr is not None
     coral_thr_value = args.coral_thr if user_provided_thr else DEFAULT_CORAL_THR
