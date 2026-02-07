@@ -1,10 +1,14 @@
 import os
+import numpy as np
 import pandas as pd
 import torch
 from collections import Counter
 from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
+
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 from .utils import normalize_exp_token, normalize_icm_te_token
 
@@ -88,13 +92,17 @@ class GardnerDataset(Dataset):
 
         # Transforms
         if self.augment:
-            self.transform = transforms.Compose([
-                transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomVerticalFlip(p=0.5),
-                transforms.RandomRotation(degrees=15),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            self.transform = A.Compose([
+                A.RandomResizedCrop(224, 224, scale=(0.75, 1.0)),
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+                A.Rotate(limit=25, p=0.7),
+                A.CLAHE(clip_limit=3.0, p=0.7),
+                A.GaussNoise(var_limit=(10, 30), p=0.4),
+                A.GaussianBlur(blur_limit=(3, 5), p=0.4),
+                A.RandomErasing(p=0.5, scale=(0.02, 0.1)),
+                A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ToTensorV2(),
             ])
         else:
             self.transform = transforms.Compose([
@@ -111,7 +119,10 @@ class GardnerDataset(Dataset):
         img_name = self.images[idx]
         img_path = os.path.join(self.img_dir, img_name)
         image = Image.open(img_path).convert("RGB")
-        image = self.transform(image)
+        if self.augment:
+            image = self.transform(image=np.asarray(image))["image"]
+        else:
+            image = self.transform(image)
 
         label = self.labels[idx]
         label_raw = self.labels_raw[idx]

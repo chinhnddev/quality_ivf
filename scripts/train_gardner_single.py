@@ -440,7 +440,6 @@ def train_one_run(cfg, args) -> None:
         print(f"[WARNING] Task '{task}' uses nominal classification. CORAL will be disabled.")
         use_coral = False
 
-    loss_name = "CORAL_BCEWithLogits" if use_coral else ("CrossEntropyLoss" if task == "exp" else "FocalLoss")
     applied_smoothing = 0.0
     if not use_coral and task == "exp" and not (use_weighted_sampler or sanity_mode):
         applied_smoothing = label_smoothing_cfg
@@ -448,7 +447,7 @@ def train_one_run(cfg, args) -> None:
     # Startup diagnostics
     print(f"\n[STARTUP DIAGNOSTICS] task={task}, num_classes={num_classes}")
     print(f"  train_size={len(ds_train)}, val_size={len(ds_val)}")
-    print(f"  track={track}, loss_name={loss_name}")
+    print(f"  track={track}")
     print(f"  use_class_weights={use_class_weights}, compute_class_weights_from_train={bool(getattr(cfg, 'compute_class_weights_from_train', False))}")
     print(f"  use_weighted_sampler={use_weighted_sampler}")
     if task == "exp":
@@ -604,6 +603,7 @@ def train_one_run(cfg, args) -> None:
     # Loss
     if use_coral and task == "exp":
         loss_fn = lambda logits, targets: coral_loss(logits, targets, num_classes)
+        loss_name = "CORAL_BCEWithLogits"
     else:
         effective_label_smoothing = label_smoothing_cfg
         if task == "exp" and (use_weighted_sampler or sanity_mode):
@@ -621,6 +621,8 @@ def train_one_run(cfg, args) -> None:
             label_smoothing=effective_label_smoothing,
             focal_gamma=focal_gamma_cfg,
         )
+        loss_name = loss_fn.__class__.__name__
+    print(f"  loss_fn={loss_name}")
     if isinstance(loss_fn, nn.Module) and device is not None:
         loss_fn = loss_fn.to(device)
 
