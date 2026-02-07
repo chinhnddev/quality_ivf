@@ -123,63 +123,54 @@ class GardnerDataset(Dataset):
 
     def _build_train_transform(self):
         cfg_get = self._cfg_get
-        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.75, 1.0)))
-        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.9, 1.1)))
-        horizontal_flip_p = float(cfg_get("horizontal_flip_prob", 0.5))
-        vertical_flip_p = float(cfg_get("vertical_flip_prob", 0.5))
-        rotation_limit = float(cfg_get("rotation_deg", 25.0))
-        rotation_prob = float(cfg_get("rotation_prob", 0.7))
-        clahe_p = float(cfg_get("clahe_prob", 0.7))
-        gauss_noise_p = float(cfg_get("gauss_noise_prob", 0.4))
-        gaussian_blur_p = float(cfg_get("gaussian_blur_prob", 0.4))
-        random_erasing_p = float(cfg_get("random_erasing_prob", 0.5))
+        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.85, 1.0)))  # Hẹp hơn để giữ phôi
+        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.95, 1.05)))  # Gần 1:1 cho embryo
+        rotation_limit = float(cfg_get("rotation_deg", 20.0))  # Giảm nhẹ nếu cần
+        clahe_clip = float(cfg_get("clahe_clip_limit", 2.5))  # Giảm để tránh over-enhance noise
 
         pipeline = [
             A.RandomResizedCrop(
-                size=(self.image_size, self.image_size),
+                height=self.image_size,
+                width=self.image_size,
                 scale=crop_scale,
                 ratio=crop_ratio,
-            )
+                interpolation=A.Interpolation.BILINEAR,
+                antialias=True,
+            ),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.Rotate(limit=rotation_limit, p=0.7, interpolation=A.Interpolation.BILINEAR),
+            A.ShiftScaleRotate(  # Thêm nhẹ để simulate misalignment
+                shift_limit=0.05,
+                scale_limit=0.1,
+                rotate_limit=10,
+                p=0.5,
+                interpolation=A.Interpolation.BILINEAR,
+            ),
+            A.CLAHE(clip_limit=clahe_clip, p=0.7),  # Enhance ICM/TE cell contrast
+            A.GaussNoise(var_limit=(5, 20), p=0.3),  # Microscope noise nhẹ
+            A.GaussianBlur(blur_limit=(3, 5), p=0.3),
+            A.CoarseDropout(  # RandomErasing-like, che small regions
+                max_holes=4,
+                max_height=int(self.image_size * 0.08),
+                max_width=int(self.image_size * 0.08),
+                fill_value=0,
+                p=0.4,
+            ),
+            # Optional: light color nếu ảnh có variation
+            A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.3) if self.color_jitter else A.NoOp(),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2(),
         ]
-        if horizontal_flip_p > 0:
-            pipeline.append(A.HorizontalFlip(p=horizontal_flip_p))
-        if vertical_flip_p > 0:
-            pipeline.append(A.VerticalFlip(p=vertical_flip_p))
-        if rotation_prob > 0:
-            pipeline.append(A.Rotate(limit=rotation_limit, p=rotation_prob))
-        if clahe_p > 0:
-            pipeline.append(A.CLAHE(clip_limit=3.0, p=clahe_p))
-        if gauss_noise_p > 0:
-            pipeline.append(A.GaussNoise(p=gauss_noise_p))
-        if gaussian_blur_p > 0:
-            pipeline.append(A.GaussianBlur(blur_limit=(3, 5), p=gaussian_blur_p))
-        if random_erasing_p > 0:
-            pipeline.append(
-                A.CoarseDropout(
-                    max_holes=1,
-                    max_height=int(self.image_size * 0.1),
-                    max_width=int(self.image_size * 0.1),
-                    p=random_erasing_p,
-                )
-            )
-        pipeline.extend(
-            [
-                A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-                ToTensorV2(),
-            ]
-        )
         return A.Compose(pipeline)
 
     def _build_eval_transform(self):
-        return transforms.Compose(
-            [
-                transforms.Resize(self.image_size),
-                transforms.CenterCrop(self.image_size),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ]
-        )
-
+        return A.Compose([
+            A.Resize(self.image_size, self.image_size, interpolation=A.Interpolation.BILINEAR),
+            A.CenterCrop(self.image_size, self.image_size),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2(),
+        ])
     def _cfg_get(self, key, default):
         cfg = self.augmentation_cfg
         if cfg is None:
