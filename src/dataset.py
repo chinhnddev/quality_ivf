@@ -122,29 +122,173 @@ class GardnerDataset(Dataset):
         return self._build_eval_transform()
 
     def _build_train_transform(self):
+        cfg_get = self._cfg_get
+        task = getattr(self, "task", "exp").lower().strip()
         img = int(self.image_size)
-        return A.Compose([
-            A.RandomResizedCrop(
-                size=(img, img),
-                scale=(0.90, 1.00),
-                ratio=(0.98, 1.02),
-                interpolation=cv2.INTER_LINEAR,
-            ),
-            A.HorizontalFlip(p=0.5),
-            A.Affine(
-                translate_percent={"x": (-0.02, 0.02), "y": (-0.02, 0.02)},
-                scale=(0.97, 1.03),
-                rotate=(-5, 5),
-                interpolation=cv2.INTER_LINEAR,
-                p=0.25,
-            ),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2(),
-        ])
+
+        if task in ["icm", "te"]:
+            # ----- Cell boundary focused augmentation -----
+            crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.85, 1.0)))
+            crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.90, 1.10)))
+
+            hflip_p = float(cfg_get("hflip_p", 0.5))
+            vflip_p = float(cfg_get("vflip_p", 0.5))
+
+            affine_p = float(cfg_get("affine_p", 0.6))
+            rotate = float(cfg_get("rotate_limit", 15))
+            translate = float(cfg_get("translate_limit", 0.03))
+            scale = float(cfg_get("scale_limit", 0.05))
+
+            use_clahe = bool(cfg_get("use_clahe", True))
+            clahe_p = float(cfg_get("clahe_p", 0.5))
+            clahe_clip = float(cfg_get("clahe_clip_limit", 2.0))
+            clahe_grid = tuple(cfg_get("clahe_tile_grid_size", (8, 8)))
+
+            bc_p = float(cfg_get("brightness_contrast_p", 0.4))
+            b_lim = float(cfg_get("brightness_limit", 0.15))
+            c_lim = float(cfg_get("contrast_limit", 0.15))
+
+            noise_p = float(cfg_get("noise_p", 0.3))
+            noise_std_range = tuple(cfg_get("noise_std_range", (5.0/255.0, 20.0/255.0)))
+            noise_mean_range = tuple(cfg_get("noise_mean_range", (0.0, 0.0)))
+
+            blur_p = float(cfg_get("blur_p", 0.2))
+            blur_limit = tuple(cfg_get("blur_limit", (3, 5)))
+
+            sharpen_p = float(cfg_get("sharpen_p", 0.2))
+            sharpen_alpha = tuple(cfg_get("sharpen_alpha", (0.1, 0.3)))
+            sharpen_lightness = tuple(cfg_get("sharpen_lightness", (0.5, 1.0)))
+
+            use_dropout = bool(cfg_get("use_coarse_dropout", True))
+            dropout_p = float(cfg_get("coarse_dropout_p", 0.3)) if use_dropout else 0.0
+            num_holes_range = tuple(cfg_get("coarse_dropout_num_holes_range", (1, 3)))
+            hole_h_range = tuple(cfg_get("coarse_dropout_hole_height_range", (8, 16)))
+            hole_w_range = tuple(cfg_get("coarse_dropout_hole_width_range", (8, 16)))
+            dropout_fill = int(cfg_get("coarse_dropout_fill", 0))
+
+            pipeline = [
+                A.RandomResizedCrop(
+                    size=(img, img),
+                    scale=crop_scale,
+                    ratio=crop_ratio,
+                    interpolation=cv2.INTER_LINEAR,
+                    p=1.0,
+                ),
+                A.HorizontalFlip(p=hflip_p),
+                A.VerticalFlip(p=vflip_p),
+
+                # Albumentations v2 recommended
+                A.Affine(
+                    rotate=(-rotate, rotate),
+                    translate_percent={"x": (-translate, translate), "y": (-translate, translate)},
+                    scale=(1 - scale, 1 + scale),
+                    interpolation=cv2.INTER_LINEAR,
+                    p=affine_p,
+                ),
+
+                A.CLAHE(clip_limit=clahe_clip, tile_grid_size=clahe_grid, p=clahe_p) if use_clahe else A.NoOp(),
+
+                A.RandomBrightnessContrast(
+                    brightness_limit=b_lim,
+                    contrast_limit=c_lim,
+                    p=bc_p,
+                ),
+
+                A.GaussNoise(
+                    std_range=noise_std_range,
+                    mean_range=noise_mean_range,
+                    p=noise_p,
+                ),
+
+                A.GaussianBlur(blur_limit=blur_limit, p=blur_p),
+
+                A.Sharpen(alpha=sharpen_alpha, lightness=sharpen_lightness, p=sharpen_p),
+
+                A.CoarseDropout(
+                    num_holes_range=num_holes_range,
+                    hole_height_range=hole_h_range,
+                    hole_width_range=hole_w_range,
+                    fill=dropout_fill,
+                    p=dropout_p,
+                ) if dropout_p > 0 else A.NoOp(),
+
+                A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ToTensorV2(),
+            ]
+            return A.Compose(pipeline)
+
+        elif task == "exp":
+            # ----- Lighter augmentation for EXP (global feature) -----
+            crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.85, 1.0)))
+            crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.90, 1.10)))
+
+            hflip_p = float(cfg_get("hflip_p", 0.5))
+            vflip_p = float(cfg_get("vflip_p", 0.5))
+
+            affine_p = float(cfg_get("affine_p", 0.6))
+            rotate = float(cfg_get("rotate_limit", 15))
+            translate = float(cfg_get("translate_limit", 0.02))
+            scale = float(cfg_get("scale_limit", 0.03))
+
+            use_clahe = bool(cfg_get("use_clahe", True))
+            clahe_p = float(cfg_get("clahe_p", 0.3))
+            clahe_clip = float(cfg_get("clahe_clip_limit", 1.5))
+            clahe_grid = tuple(cfg_get("clahe_tile_grid_size", (8, 8)))
+
+            bc_p = float(cfg_get("brightness_contrast_p", 0.3))
+            b_lim = float(cfg_get("brightness_limit", 0.10))
+            c_lim = float(cfg_get("contrast_limit", 0.10))
+
+            noise_p = float(cfg_get("noise_p", 0.2))
+            noise_std_range = tuple(cfg_get("noise_std_range", (5.0/255.0, 15.0/255.0)))
+            noise_mean_range = tuple(cfg_get("noise_mean_range", (0.0, 0.0)))
+
+            pipeline = [
+                A.RandomResizedCrop(
+                    size=(img, img),
+                    scale=crop_scale,
+                    ratio=crop_ratio,
+                    interpolation=cv2.INTER_LINEAR,
+                    p=1.0,
+                ),
+                A.HorizontalFlip(p=hflip_p),
+                A.VerticalFlip(p=vflip_p),
+
+                A.Affine(
+                    rotate=(-rotate, rotate),
+                    translate_percent={"x": (-translate, translate), "y": (-translate, translate)},
+                    scale=(1 - scale, 1 + scale),
+                    interpolation=cv2.INTER_LINEAR,
+                    p=affine_p,
+                ),
+
+                A.CLAHE(clip_limit=clahe_clip, tile_grid_size=clahe_grid, p=clahe_p) if use_clahe else A.NoOp(),
+
+                A.RandomBrightnessContrast(
+                    brightness_limit=b_lim,
+                    contrast_limit=c_lim,
+                    p=bc_p,
+                ),
+
+                A.GaussNoise(
+                    std_range=noise_std_range,
+                    mean_range=noise_mean_range,
+                    p=noise_p,
+                ),
+
+                A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ToTensorV2(),
+            ]
+            return A.Compose(pipeline)
+
+        else:
+            raise ValueError(f"Unknown task: {task}. Must be one of ['icm', 'te', 'exp']")
+
 
     def _build_eval_transform(self):
         img = int(self.image_size)
         resize_size = int(getattr(self, "resize_size", 256))
+
         return A.Compose([
             A.Resize(resize_size, resize_size, interpolation=cv2.INTER_LINEAR),
             A.CenterCrop(img, img),
