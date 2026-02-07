@@ -287,7 +287,7 @@ class GardnerDataset(Dataset):
 
     def _build_eval_transform(self):
         img = int(self.image_size)
-        resize_size = int(getattr(self, "resize_size", 256))
+        resize_size = int(getattr(self, "resize_size", 224))
 
         return A.Compose([
             A.Resize(resize_size, resize_size, interpolation=cv2.INTER_LINEAR),
