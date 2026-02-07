@@ -547,10 +547,10 @@ def train_one_run(cfg, args) -> None:
     if use_coral:
         print(f"CORAL tuning: enabled={tune_coral_thr} grid=[{thr_min},{thr_max}] step={thr_step}")
 
+    monitor_metric = cfg.monitor.metric if hasattr(cfg, 'monitor') and hasattr(cfg.monitor, 'metric') else "macro_f1"
     best_metric = -1.0
     best_path = out_dir / "best.ckpt"
     metrics_val_path = out_dir / "metrics_val.json"
-    monitor_metric = cfg.monitor.metric if hasattr(cfg, 'monitor') and hasattr(cfg.monitor, 'metric') else "macro_f1"
     best_epoch = -1
 
     # Sanity overfit test (optional)
@@ -736,7 +736,7 @@ def train_one_run(cfg, args) -> None:
 
         # val
         val_metrics = evaluate_on_val(model, dl_val, device, use_coral, verbose=(epoch == epochs or epoch % 10 == 0), task=task)
-        monitor = val_metrics[monitor_metric]  # align with cfg.monitor.metric if you prefer parsing it
+        monitor = val_metrics[monitor_metric]
         print(f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f} | "
               f"val_acc={val_metrics['acc']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
               f"val_weighted_f1={val_metrics['weighted_f1']:.4f}")

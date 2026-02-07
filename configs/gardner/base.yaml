@@ -78,7 +78,7 @@ metrics:
 
 # Validation / checkpointing
 monitor:
-  metric: weighted_f1
+  metric: acc
   mode: max
   patience: 10
 
