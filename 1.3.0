@@ -1,0 +1,34 @@
+Collecting albumentations
+  Downloading albumentations-2.0.8-py3-none-any.whl.metadata (43 kB)
+Requirement already satisfied: numpy>=1.24.4 in c:\users\admin\appdata\local\programs\python\python312\lib\site-packages (from albumentations) (1.26.4)
+Requirement already satisfied: scipy>=1.10.0 in c:\users\admin\appdata\local\programs\python\python312\lib\site-packages (from albumentations) (1.16.2)
+Requirement already satisfied: PyYAML in c:\users\admin\appdata\local\programs\python\python312\lib\site-packages (from albumentations) (6.0.3)
+Requirement already satisfied: pydantic>=2.9.2 in c:\users\admin\appdata\local\programs\python\python312\lib\site-packages (from albumentations) (2.9.2)
+Collecting albucore==0.0.24 (from albumentations)
+  Downloading albucore-0.0.24-py3-none-any.whl.metadata (5.3 kB)
+Collecting opencv-python-headless>=4.9.0.80 (from albumentations)
+  Downloading opencv_python_headless-4.13.0.92-cp37-abi3-win_amd64.whl.metadata (20 kB)
+Collecting stringzilla>=3.10.4 (from albucore==0.0.24->albumentations)
+  Downloading stringzilla-4.6.0-cp312-cp312-win_amd64.whl.metadata (124 kB)
+Collecting simsimd>=5.9.2 (from albucore==0.0.24->albumentations)
+  Downloading simsimd-6.5.12-cp312-cp312-win_amd64.whl.metadata (71 kB)
+Collecting numpy>=1.24.4 (from albumentations)
+  Downloading numpy-2.4.2-cp312-cp312-win_amd64.whl.metadata (6.6 kB)
+Requirement already satisfied: annotated-types>=0.6.0 in c:\users\admin\appdata\local\programs\python\python312\lib\site-packages (from pydantic>=2.9.2->albumentations) (0.7.0)
+Requirement already satisfied: pydantic-core==2.23.4 in c:\users\admin\appdata\local\programs\python\python312\lib\site-packages (from pydantic>=2.9.2->albumentations) (2.23.4)
+Requirement already satisfied: typing-extensions>=4.6.1 in c:\users\admin\appdata\local\programs\python\python312\lib\site-packages (from pydantic>=2.9.2->albumentations) (4.15.0)
+Downloading albumentations-2.0.8-py3-none-any.whl (369 kB)
+Downloading albucore-0.0.24-py3-none-any.whl (15 kB)
+Downloading opencv_python_headless-4.13.0.92-cp37-abi3-win_amd64.whl (40.1 MB)
+   ---------------------------------------- 40.1/40.1 MB 5.7 MB/s  0:00:07
+Downloading numpy-2.4.2-cp312-cp312-win_amd64.whl (12.3 MB)
+   ---------------------------------------- 12.3/12.3 MB 7.6 MB/s  0:00:01
+Downloading simsimd-6.5.12-cp312-cp312-win_amd64.whl (87 kB)
+Downloading stringzilla-4.6.0-cp312-cp312-win_amd64.whl (162 kB)
+Installing collected packages: simsimd, stringzilla, numpy, opencv-python-headless, albucore, albumentations
+  Attempting uninstall: numpy
+    Found existing installation: numpy 1.26.4
+    Uninstalling numpy-1.26.4:
+      Successfully uninstalled numpy-1.26.4
+
+Successfully installed albucore-0.0.24 albumentations-2.0.8 numpy-2.4.2 opencv-python-headless-4.13.0.92 simsimd-6.5.12 stringzilla-4.6.0
