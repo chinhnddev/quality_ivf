@@ -130,8 +130,7 @@ class GardnerDataset(Dataset):
 
         pipeline = [
             A.RandomResizedCrop(
-                height=self.image_size,
-                width=self.image_size,
+                size=(self.image_size, self.image_size),
                 scale=crop_scale,
                 ratio=crop_ratio,
             ),
