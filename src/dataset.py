@@ -123,73 +123,69 @@ class GardnerDataset(Dataset):
 
     def _build_train_transform(self):
         cfg_get = self._cfg_get
-        task = getattr(self, "task", "te")
+        task = getattr(self, "task", "exp")
         img = int(self.image_size)
 
-        # ----- TE: keep geometry mild, texture-preserving -----
-        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.88, 1.00)))
-        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.97, 1.03)))
+        # ----- EXP: mild geometry, focus contrast/edge for cavity expansion -----
+        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.85, 1.00)))  # Narrow to preserve cavity
+        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.95, 1.05)))  # Near square
 
         hflip_p = float(cfg_get("hflip_p", 0.5))
-        vflip_p = float(cfg_get("vflip_p", 0.15))
+        vflip_p = float(cfg_get("vflip_p", 0.3))  # Moderate for expansion symmetry
 
-        affine_p = float(cfg_get("affine_p", 0.35))
-        translate = float(cfg_get("translate_limit", 0.03))   # ~3%
-        scale = float(cfg_get("scale_limit", 0.05))           # ±5%
-        rotate = float(cfg_get("rotate_limit", 6))            # ±6 deg
+        affine_p = float(cfg_get("affine_p", 0.6))  # Increase for slight distortions
+        translate = float(cfg_get("translate_limit", 0.06))   # ~6% shift
+        scale = float(cfg_get("scale_limit", 0.1))            # ±10% for expansion simulation
+        rotate = float(cfg_get("rotate_limit", 15))           # ±15 deg from researches
 
-        # photometric: very mild
-        color_jitter = bool(getattr(self, "color_jitter", False))
-        bc_p = float(cfg_get("brightness_contrast_p", 0.20))
-        b_lim = float(cfg_get("brightness_limit", 0.05))
-        c_lim = float(cfg_get("contrast_limit", 0.05))
+        # Photometric: light for microscope variations
+        bc_p = float(cfg_get("brightness_contrast_p", 0.35))
+        b_lim = float(cfg_get("brightness_limit", 0.1))
+        c_lim = float(cfg_get("contrast_limit", 0.1))
 
-        # CLAHE: optional, mild
+        # CLAHE: high p for cavity boundaries
         use_clahe = bool(cfg_get("use_clahe", True))
-        clahe_p = float(cfg_get("clahe_p", 0.15))
-        clahe_clip = float(cfg_get("clahe_clip_limit", 2.0))
+        clahe_p = float(cfg_get("clahe_p", 0.8))
+        clahe_clip = float(cfg_get("clahe_clip_limit", 2.5))  # Mild to avoid artifacts
 
-        # Noise/blur: TE sensitive -> very low
-        noise_p = float(cfg_get("noise_p", 0.10))
-        # albumentations v2: use std_range (fraction of max) - keep tiny
-        noise_std_range = tuple(cfg_get("noise_std_range", (0.01, 0.03)))
+        # Noise/blur: low-moderate for robustness
+        noise_p = float(cfg_get("noise_p", 0.25))
+        noise_std_range = tuple(cfg_get("noise_std_range", (0.02, 0.05)))  # Slight increase
 
-        blur_p = float(cfg_get("blur_p", 0.05))
-        blur_limit = tuple(cfg_get("blur_limit", (3, 3)))
+        blur_p = float(cfg_get("blur_p", 0.15))
+        blur_limit = tuple(cfg_get("blur_limit", (3, 5)))
 
-        # Dropout: usually OFF for TE; if enabled, extremely light
-        use_dropout = bool(cfg_get("use_coarse_dropout", False))
-        dropout_p = float(cfg_get("coarse_dropout_p", 0.05)) if use_dropout else 0.0
-        max_holes = int(cfg_get("coarse_dropout_max_holes", 1))
-        max_frac = float(cfg_get("coarse_dropout_max_frac", 0.04))
+        # Dropout: light for occlusion
+        use_dropout = bool(cfg_get("use_coarse_dropout", True))
+        dropout_p = float(cfg_get("coarse_dropout_p", 0.35)) if use_dropout else 0.0
+        max_holes = int(cfg_get("coarse_dropout_max_holes", 2))
+        max_frac = float(cfg_get("coarse_dropout_max_frac", 0.06))  # Small to not obscure cavity
 
         pipeline = [
             A.RandomResizedCrop(
                 size=(img, img),
                 scale=crop_scale,
                 ratio=crop_ratio,
-                interpolation=cv2.INTER_LINEAR,
+                interpolation=2,  # cv2.INTER_LINEAR
             ),
             A.HorizontalFlip(p=hflip_p),
             A.VerticalFlip(p=vflip_p),
 
-            # ✅ Replace ShiftScaleRotate with Affine (v2 recommended)
             A.Affine(
                 translate_percent={"x": (-translate, translate), "y": (-translate, translate)},
                 scale=(1 - scale, 1 + scale),
                 rotate=(-rotate, rotate),
-                interpolation=cv2.INTER_LINEAR,
+                interpolation=2,
                 p=affine_p,
             ),
             A.RandomBrightnessContrast(
                 brightness_limit=b_lim,
                 contrast_limit=c_lim,
-                p=bc_p if color_jitter else 0.0
+                p=bc_p,
             ),
 
             A.CLAHE(clip_limit=clahe_clip, p=clahe_p) if use_clahe else A.NoOp(),
 
-            # ✅ GaussNoise v2: std_range (no var_limit)
             A.GaussNoise(std_range=noise_std_range, p=noise_p),
 
             A.GaussianBlur(blur_limit=blur_limit, p=blur_p),
