@@ -122,7 +122,7 @@ class GardnerDataset(Dataset):
         return self._build_eval_transform()
 
     def _build_train_transform(self):
-        """Build training augmentation pipeline (FIXED & IMPROVED)"""
+        """Build training augmentation pipeline (CONSERVATIVE)"""
         cfg_get = self._cfg_get
         img = int(self.image_size)
         
@@ -130,83 +130,51 @@ class GardnerDataset(Dataset):
         crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.9, 1.1)))
 
         pipeline = [
-            # ✅ FIXED: Use 'size' parameter (tuple)
-            A.RandomResizedCrop(
-                size=(img, img),  # ← MUST BE TUPLE!
-                scale=crop_scale,
-                ratio=crop_ratio,
-                interpolation=cv2.INTER_LINEAR,
-                p=1.0,
-            ),
+            A.RandomResizedCrop(height=img, width=img, scale=crop_scale, ratio=crop_ratio, p=1.0),
             
-            # Geometric augmentations
-            A.HorizontalFlip(p=float(cfg_get("hflip_p", 0.5))),
-            A.VerticalFlip(p=float(cfg_get("vflip_p", 0.5))),  # ✅ INCREASED from 0.10
+            # Geometric (MODERATE)
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),  # ✅ Keep this fix
             
-            # ✅ Use Affine (instead of deprecated ShiftScaleRotate)
+            # ✅ REDUCED: Rotation ±15° → ±10°
             A.Affine(
-                rotate=(-15, 15),      # ✅ INCREASED from ±5°
-                translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
-                scale=(0.90, 1.10),    # ✅ INCREASED from (0.97,1.03)
+                rotate=(-10, 10),      # ✅ REDUCED from ±15°
+                translate_percent={"x": (-0.03, 0.03), "y": (-0.03, 0.03)},  # ✅ REDUCED from ±5%
+                scale=(0.95, 1.05),    # ✅ REDUCED from (0.90,1.10)
                 interpolation=cv2.INTER_LINEAR,
                 border_mode=cv2.BORDER_REFLECT_101,
-                p=float(cfg_get("affine_p", 0.5)),  # ✅ INCREASED from 0.25
+                p=0.3,  # ✅ REDUCED from 0.5
             ),
             
-            # Color augmentations
+            # Color (LIGHT)
             A.RandomBrightnessContrast(
-                brightness_limit=0.15,  # ✅ INCREASED from 0.05
-                contrast_limit=0.15,    # ✅ INCREASED from 0.08
-                p=float(cfg_get("bc_p", 0.4)),  # ✅ INCREASED from 0.25
+                brightness_limit=0.10,  # ✅ REDUCED from 0.15
+                contrast_limit=0.10,    # ✅ REDUCED from 0.15
+                p=0.3,  # ✅ REDUCED from 0.4
             ),
             A.RandomGamma(
-                gamma_limit=(85, 115),  # ✅ INCREASED from (90,110)
-                p=float(cfg_get("gamma_p", 0.3)),  # ✅ INCREASED from 0.25
+                gamma_limit=(88, 112),  # ✅ REDUCED from (85,115)
+                p=0.2,  # ✅ REDUCED from 0.3
             ),
             
-            # ✅ NEW: Hue/Saturation for microscopy
+            # ✅ REDUCED: HSV
             A.HueSaturationValue(
-                hue_shift_limit=10,
-                sat_shift_limit=15,
-                val_shift_limit=10,
-                p=float(cfg_get("hsv_p", 0.3)),
+                hue_shift_limit=8,      # ✅ REDUCED from 10
+                sat_shift_limit=10,     # ✅ REDUCED from 15
+                val_shift_limit=8,      # ✅ REDUCED from 10
+                p=0.2,  # ✅ REDUCED from 0.3
             ),
             
-            # CLAHE
-            A.CLAHE(
-                clip_limit=2.0,
-                tile_grid_size=(8, 8),
-                p=float(cfg_get("clahe_p", 0.2)),  # ✅ INCREASED from 0.15
-            ),
+            # ✅ REDUCED: CLAHE
+            A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=0.15),  # ✅ REDUCED from 0.2
             
-            # Quality degradation
-            A.OneOf([
-                A.GaussianBlur(blur_limit=(3, 5), p=1.0),
-                A.MedianBlur(blur_limit=3, p=1.0),
-                A.MotionBlur(blur_limit=3, p=1.0),
-            ], p=float(cfg_get("blur_p", 0.15))),  # ✅ INCREASED from 0.08
+            # ✅ REDUCED: Blur
+            A.GaussianBlur(blur_limit=(3, 3), p=0.1),  # ✅ REDUCED from 0.15
             
-            # ✅ FIXED: GaussNoise API (std_range / mean_range)
-            A.GaussNoise(
-                std_range=(5.0 / 255.0, 15.0 / 255.0),
-                mean_range=(0.0, 0.0),
-                p=float(cfg_get("noise_p", 0.15)),
-            ),
-            
-            # ✅ FIXED: CoarseDropout NEW API
-            A.CoarseDropout(
-                num_holes_range=(1, 3),
-                hole_height_range=(8, 16),
-                hole_width_range=(8, 16),
-                fill=0,
-                p=float(cfg_get("dropout_p", 0.15)),
-            ),
-
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ]
         return A.Compose(pipeline)
-
 
     def _build_eval_transform(self):
         """Build evaluation augmentation pipeline (IMPROVED)"""
