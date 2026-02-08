@@ -122,47 +122,58 @@ class GardnerDataset(Dataset):
         return self._build_eval_transform()
 
     def _build_train_transform(self):
-        """EXACT BASELINE - NO CHANGES"""
-        cfg_get = self._cfg_get
-        img = int(self.image_size)
+        """EXACT BASELINE (PyTorch → Albumentations conversion)"""
+        img = int(self.image_size)  # 224
         
-        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.8, 1.0)))
-        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.9, 1.1)))
-
         pipeline = [
-            A.RandomResizedCrop(size=(img, img), scale=crop_scale, ratio=crop_ratio, p=1.0),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.10),  # ← QUAY LẠI 0.10 NHƯ CŨ!
-            
-            A.Affine(
-                rotate=(-5, 5),
-                translate_percent={"x": (-0.02, 0.02), "y": (-0.02, 0.02)},
-                scale=(0.97, 1.03),
-                p=0.25,
+            # PyTorch: RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1))
+            A.RandomResizedCrop(
+                height=img, 
+                width=img, 
+                scale=(0.8, 1.0), 
+                ratio=(0.9, 1.1),
+                interpolation=cv2.INTER_LINEAR,
+                p=1.0
             ),
             
-            A.RandomBrightnessContrast(brightness_limit=0.05, contrast_limit=0.08, p=0.25),
-            A.RandomGamma(gamma_limit=(90, 110), p=0.25),
-            A.CLAHE(clip_limit=1.8, tile_grid_size=(8, 8), p=0.15),
-            A.GaussianBlur(blur_limit=(3, 3), p=0.08),
+            # PyTorch: RandomHorizontalFlip(p=0.5)
+            A.HorizontalFlip(p=0.5),
             
+            # PyTorch: RandomVerticalFlip(p=0.5)
+            A.VerticalFlip(p=0.5),
+            
+            # PyTorch: RandomRotation(degrees=15)
+            A.Rotate(limit=15, interpolation=cv2.INTER_LINEAR, border_mode=cv2.BORDER_REFLECT_101, p=1.0),
+            
+            # PyTorch: Normalize
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            
+            # PyTorch: ToTensor
             ToTensorV2(),
         ]
+        
         return A.Compose(pipeline)
 
 
     def _build_eval_transform(self):
-        """EXACT BASELINE - NO CHANGES"""
-        img = int(self.image_size)
-        resize_size = int(getattr(self, "resize_size", 256))
+        """EXACT BASELINE EVAL (PyTorch → Albumentations conversion)"""
+        img = int(self.image_size)  # 224
         
-        return A.Compose([
-            A.Resize(resize_size, resize_size, interpolation=cv2.INTER_LINEAR),  # ← QUAY LẠI Resize NHƯ CŨ
-            A.CenterCrop(height=img, width=img),
+        pipeline = [
+            # PyTorch: Resize(224)
+            A.Resize(height=img, width=img, interpolation=cv2.INTER_LINEAR, p=1.0),
+            
+            # PyTorch: CenterCrop(224) - redundant after Resize(224) but keeping for exact match
+            A.CenterCrop(height=img, width=img, p=1.0),
+            
+            # PyTorch: Normalize
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            
+            # PyTorch: ToTensor
             ToTensorV2(),
-        ])
+        ]
+        
+        return A.Compose(pipeline)
     def _cfg_get(self, key, default):
         cfg = self.augmentation_cfg
         if cfg is None:
