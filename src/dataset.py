@@ -122,7 +122,7 @@ class GardnerDataset(Dataset):
         return self._build_eval_transform()
 
     def _build_train_transform(self):
-        """Build training augmentation pipeline (MINIMAL - BASELINE)"""
+        """EXACT BASELINE - NO CHANGES"""
         cfg_get = self._cfg_get
         img = int(self.image_size)
         
@@ -130,11 +130,10 @@ class GardnerDataset(Dataset):
         crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.9, 1.1)))
 
         pipeline = [
-            A.RandomResizedCrop(size=(img, img), scale=crop_scale, ratio=crop_ratio, p=1.0),
+            A.RandomResizedCrop(height=img, width=img, scale=crop_scale, ratio=crop_ratio, p=1.0),
             A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),  # ✅ ONLY KEY FIX!
+            A.VerticalFlip(p=0.10),  # ← QUAY LẠI 0.10 NHƯ CŨ!
             
-            # Very light geometric
             A.Affine(
                 rotate=(-5, 5),
                 translate_percent={"x": (-0.02, 0.02), "y": (-0.02, 0.02)},
@@ -142,27 +141,25 @@ class GardnerDataset(Dataset):
                 p=0.25,
             ),
             
-            # Very light color
             A.RandomBrightnessContrast(brightness_limit=0.05, contrast_limit=0.08, p=0.25),
             A.RandomGamma(gamma_limit=(90, 110), p=0.25),
+            A.CLAHE(clip_limit=1.8, tile_grid_size=(8, 8), p=0.15),
+            A.GaussianBlur(blur_limit=(3, 3), p=0.08),
             
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ]
         return A.Compose(pipeline)
 
+
     def _build_eval_transform(self):
-        """Build evaluation augmentation pipeline (IMPROVED)"""
+        """EXACT BASELINE - NO CHANGES"""
         img = int(self.image_size)
         resize_size = int(getattr(self, "resize_size", 256))
         
         return A.Compose([
-            # ✅ IMPROVED: Preserve aspect ratio
-            A.SmallestMaxSize(max_size=resize_size, interpolation=cv2.INTER_LINEAR),
-
-            # ✅ FIXED: Provide explicit height/width
+            A.Resize(resize_size, resize_size, interpolation=cv2.INTER_LINEAR),  # ← QUAY LẠI Resize NHƯ CŨ
             A.CenterCrop(height=img, width=img),
-
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ])
