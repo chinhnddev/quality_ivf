@@ -128,9 +128,8 @@ class GardnerDataset(Dataset):
         pipeline = [
             # PyTorch: RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.9, 1.1))
             A.RandomResizedCrop(
-                height=img, 
-                width=img, 
-                scale=(0.8, 1.0), 
+                size=(img, img),
+                scale=(0.8, 1.0),
                 ratio=(0.9, 1.1),
                 interpolation=cv2.INTER_LINEAR,
                 p=1.0
