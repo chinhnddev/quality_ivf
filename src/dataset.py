@@ -122,17 +122,17 @@ class GardnerDataset(Dataset):
         return self._build_eval_transform()
 
     def _build_train_transform(self):
+        """Build training augmentation pipeline (FIXED & IMPROVED)"""
         cfg_get = self._cfg_get
         img = int(self.image_size)
-
+        
         crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.8, 1.0)))
         crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.9, 1.1)))
 
         pipeline = [
-            # Base transforms
+            # ✅ FIXED: Use 'size' parameter (tuple)
             A.RandomResizedCrop(
-                height=img,
-                width=img,
+                size=(img, img),  # ← MUST BE TUPLE!
                 scale=crop_scale,
                 ratio=crop_ratio,
                 interpolation=cv2.INTER_LINEAR,
@@ -141,27 +141,27 @@ class GardnerDataset(Dataset):
             
             # Geometric augmentations
             A.HorizontalFlip(p=float(cfg_get("hflip_p", 0.5))),
-            A.VerticalFlip(p=float(cfg_get("vflip_p", 0.5))),  # ✅ FIXED: 0.10 → 0.5
+            A.VerticalFlip(p=float(cfg_get("vflip_p", 0.5))),  # ✅ INCREASED from 0.10
             
-            # ✅ FIXED: Use Affine instead of ShiftScaleRotate
+            # ✅ Use Affine (instead of deprecated ShiftScaleRotate)
             A.Affine(
-                rotate=(-15, 15),      # ✅ INCREASED: ±5° → ±15°
+                rotate=(-15, 15),      # ✅ INCREASED from ±5°
                 translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
-                scale=(0.90, 1.10),    # ✅ INCREASED: (0.97,1.03) → (0.90,1.10)
+                scale=(0.90, 1.10),    # ✅ INCREASED from (0.97,1.03)
                 interpolation=cv2.INTER_LINEAR,
                 border_mode=cv2.BORDER_REFLECT_101,
-                p=float(cfg_get("affine_p", 0.5)),  # ✅ INCREASED: 0.25 → 0.5
+                p=float(cfg_get("affine_p", 0.5)),  # ✅ INCREASED from 0.25
             ),
             
             # Color augmentations
             A.RandomBrightnessContrast(
-                brightness_limit=0.15,  # ✅ INCREASED: 0.05 → 0.15
-                contrast_limit=0.15,    # ✅ INCREASED: 0.08 → 0.15
-                p=float(cfg_get("bc_p", 0.4)),  # ✅ INCREASED: 0.25 → 0.4
+                brightness_limit=0.15,  # ✅ INCREASED from 0.05
+                contrast_limit=0.15,    # ✅ INCREASED from 0.08
+                p=float(cfg_get("bc_p", 0.4)),  # ✅ INCREASED from 0.25
             ),
             A.RandomGamma(
-                gamma_limit=(85, 115),  # ✅ INCREASED: (90,110) → (85,115)
-                p=float(cfg_get("gamma_p", 0.3)),  # ✅ INCREASED: 0.25 → 0.3
+                gamma_limit=(85, 115),  # ✅ INCREASED from (90,110)
+                p=float(cfg_get("gamma_p", 0.3)),  # ✅ INCREASED from 0.25
             ),
             
             # ✅ NEW: Hue/Saturation for microscopy
@@ -172,11 +172,11 @@ class GardnerDataset(Dataset):
                 p=float(cfg_get("hsv_p", 0.3)),
             ),
             
-            # CLAHE (keep mild)
+            # CLAHE
             A.CLAHE(
                 clip_limit=2.0,
                 tile_grid_size=(8, 8),
-                p=float(cfg_get("clahe_p", 0.2)),  # ✅ INCREASED: 0.15 → 0.2
+                p=float(cfg_get("clahe_p", 0.2)),  # ✅ INCREASED from 0.15
             ),
             
             # Quality degradation
@@ -184,19 +184,19 @@ class GardnerDataset(Dataset):
                 A.GaussianBlur(blur_limit=(3, 5), p=1.0),
                 A.MedianBlur(blur_limit=3, p=1.0),
                 A.MotionBlur(blur_limit=3, p=1.0),
-            ], p=float(cfg_get("blur_p", 0.15))),  # ✅ INCREASED: 0.08 → 0.15
+            ], p=float(cfg_get("blur_p", 0.15))),  # ✅ INCREASED from 0.08
             
-            # ✅ FIXED: GaussNoise API
+            # ✅ FIXED: GaussNoise API (removed 'mean' param)
             A.GaussNoise(
-                var_limit=(5.0, 15.0),  # Removed 'mean' param
-                p=float(cfg_get("noise_p", 0.15)),  # ✅ INCREASED: 0.10 → 0.15
+                var_limit=(5.0, 15.0),
+                p=float(cfg_get("noise_p", 0.15)),  # ✅ INCREASED from 0.10
             ),
             
-            # ✅ FIXED: CoarseDropout API (NEW style)
+            # ✅ FIXED: CoarseDropout NEW API
             A.CoarseDropout(
-                num_holes_range=(1, 3),      # min_holes, max_holes
-                hole_height_range=(8, 16),   # min_height, max_height  
-                hole_width_range=(8, 16),    # min_width, max_width
+                num_holes_range=(1, 3),
+                hole_height_range=(8, 16),
+                hole_width_range=(8, 16),
                 fill_value=0,
                 p=float(cfg_get("dropout_p", 0.15)),
             ),
@@ -206,14 +206,19 @@ class GardnerDataset(Dataset):
         ]
         return A.Compose(pipeline)
 
+
     def _build_eval_transform(self):
+        """Build evaluation augmentation pipeline (IMPROVED)"""
         img = int(self.image_size)
         resize_size = int(getattr(self, "resize_size", 256))
-
+        
         return A.Compose([
-            # ✅ BETTER: Preserve aspect ratio
+            # ✅ IMPROVED: Preserve aspect ratio
             A.SmallestMaxSize(max_size=resize_size, interpolation=cv2.INTER_LINEAR),
-            A.CenterCrop(height=img, width=img),
+            
+            # ✅ FIXED: Use 'size' parameter (tuple)
+            A.CenterCrop(size=(img, img)),  # ← MUST BE TUPLE!
+            
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ])
