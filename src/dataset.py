@@ -125,8 +125,8 @@ class GardnerDataset(Dataset):
         cfg_get = self._cfg_get
         img = int(self.image_size)
 
-        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.90, 1.00)))
-        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.98, 1.02)))
+        crop_scale = tuple(cfg_get("random_resized_crop_scale", (0.8, 1.0)))
+        crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.9, 1.1)))
 
         pipeline = [
             A.RandomResizedCrop(
