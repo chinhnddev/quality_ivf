@@ -122,7 +122,7 @@ class GardnerDataset(Dataset):
         return self._build_eval_transform()
 
     def _build_train_transform(self):
-        """Build training augmentation pipeline (CONSERVATIVE)"""
+        """Build training augmentation pipeline (MINIMAL - BASELINE)"""
         cfg_get = self._cfg_get
         img = int(self.image_size)
         
@@ -131,45 +131,20 @@ class GardnerDataset(Dataset):
 
         pipeline = [
             A.RandomResizedCrop(height=img, width=img, scale=crop_scale, ratio=crop_ratio, p=1.0),
-            
-            # Geometric (MODERATE)
             A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),  # ✅ Keep this fix
+            A.VerticalFlip(p=0.5),  # ✅ ONLY KEY FIX!
             
-            # ✅ REDUCED: Rotation ±15° → ±10°
+            # Very light geometric
             A.Affine(
-                rotate=(-10, 10),      # ✅ REDUCED from ±15°
-                translate_percent={"x": (-0.03, 0.03), "y": (-0.03, 0.03)},  # ✅ REDUCED from ±5%
-                scale=(0.95, 1.05),    # ✅ REDUCED from (0.90,1.10)
-                interpolation=cv2.INTER_LINEAR,
-                border_mode=cv2.BORDER_REFLECT_101,
-                p=0.3,  # ✅ REDUCED from 0.5
+                rotate=(-5, 5),
+                translate_percent={"x": (-0.02, 0.02), "y": (-0.02, 0.02)},
+                scale=(0.97, 1.03),
+                p=0.25,
             ),
             
-            # Color (LIGHT)
-            A.RandomBrightnessContrast(
-                brightness_limit=0.10,  # ✅ REDUCED from 0.15
-                contrast_limit=0.10,    # ✅ REDUCED from 0.15
-                p=0.3,  # ✅ REDUCED from 0.4
-            ),
-            A.RandomGamma(
-                gamma_limit=(88, 112),  # ✅ REDUCED from (85,115)
-                p=0.2,  # ✅ REDUCED from 0.3
-            ),
-            
-            # ✅ REDUCED: HSV
-            A.HueSaturationValue(
-                hue_shift_limit=8,      # ✅ REDUCED from 10
-                sat_shift_limit=10,     # ✅ REDUCED from 15
-                val_shift_limit=8,      # ✅ REDUCED from 10
-                p=0.2,  # ✅ REDUCED from 0.3
-            ),
-            
-            # ✅ REDUCED: CLAHE
-            A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=0.15),  # ✅ REDUCED from 0.2
-            
-            # ✅ REDUCED: Blur
-            A.GaussianBlur(blur_limit=(3, 3), p=0.1),  # ✅ REDUCED from 0.15
+            # Very light color
+            A.RandomBrightnessContrast(brightness_limit=0.05, contrast_limit=0.08, p=0.25),
+            A.RandomGamma(gamma_limit=(90, 110), p=0.25),
             
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
