@@ -130,7 +130,7 @@ class GardnerDataset(Dataset):
         crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.9, 1.1)))
 
         pipeline = [
-            A.RandomResizedCrop(height=img, width=img, scale=crop_scale, ratio=crop_ratio, p=1.0),
+            A.RandomResizedCrop(size=(img, img), scale=crop_scale, ratio=crop_ratio, p=1.0),
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.10),  # ← QUAY LẠI 0.10 NHƯ CŨ!
             
