@@ -131,76 +131,74 @@ class GardnerDataset(Dataset):
         pipeline = [
             # Base transforms
             A.RandomResizedCrop(
-                size=(img, img),
+                height=img,
+                width=img,
                 scale=crop_scale,
                 ratio=crop_ratio,
                 interpolation=cv2.INTER_LINEAR,
                 p=1.0,
             ),
             
-            # Geometric augmentations (TĂNG!)
-            A.HorizontalFlip(p=0.5),  # ✅ Keep 50%
-            A.VerticalFlip(p=0.5),     # ✅ TĂNG từ 10% → 50%
+            # Geometric augmentations
+            A.HorizontalFlip(p=float(cfg_get("hflip_p", 0.5))),
+            A.VerticalFlip(p=float(cfg_get("vflip_p", 0.5))),  # ✅ FIXED: 0.10 → 0.5
             
-            # ShiftScaleRotate (thay thế Affine - mạnh hơn)
-            A.ShiftScaleRotate(
-                shift_limit=0.05,      # ±5% shift
-                scale_limit=0.1,       # ±10% scale
-                rotate_limit=15,       # ✅ ±15° (TĂNG từ ±5°)
+            # ✅ FIXED: Use Affine instead of ShiftScaleRotate
+            A.Affine(
+                rotate=(-15, 15),      # ✅ INCREASED: ±5° → ±15°
+                translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
+                scale=(0.90, 1.10),    # ✅ INCREASED: (0.97,1.03) → (0.90,1.10)
                 interpolation=cv2.INTER_LINEAR,
                 border_mode=cv2.BORDER_REFLECT_101,
-                p=0.5,                 # ✅ TĂNG từ 25% → 50%
+                p=float(cfg_get("affine_p", 0.5)),  # ✅ INCREASED: 0.25 → 0.5
             ),
             
-            # Color augmentations (TĂNG!)
+            # Color augmentations
             A.RandomBrightnessContrast(
-                brightness_limit=0.15,  # ✅ TĂNG từ 0.05 → 0.15
-                contrast_limit=0.15,    # ✅ TĂNG từ 0.08 → 0.15
-                p=0.4,                  # ✅ TĂNG từ 0.25 → 0.4
+                brightness_limit=0.15,  # ✅ INCREASED: 0.05 → 0.15
+                contrast_limit=0.15,    # ✅ INCREASED: 0.08 → 0.15
+                p=float(cfg_get("bc_p", 0.4)),  # ✅ INCREASED: 0.25 → 0.4
             ),
             A.RandomGamma(
-                gamma_limit=(85, 115),  # ✅ TĂNG từ (90,110) → (85,115)
-                p=0.3,                  # ✅ TĂNG từ 0.25 → 0.3
+                gamma_limit=(85, 115),  # ✅ INCREASED: (90,110) → (85,115)
+                p=float(cfg_get("gamma_p", 0.3)),  # ✅ INCREASED: 0.25 → 0.3
             ),
             
-            # Hue/Saturation (MỚI - quan trọng cho microscopy!)
+            # ✅ NEW: Hue/Saturation for microscopy
             A.HueSaturationValue(
                 hue_shift_limit=10,
                 sat_shift_limit=15,
                 val_shift_limit=10,
-                p=0.3,
+                p=float(cfg_get("hsv_p", 0.3)),
             ),
             
             # CLAHE (keep mild)
             A.CLAHE(
-                clip_limit=2.0,         # ✅ Tăng nhẹ từ 1.8 → 2.0
+                clip_limit=2.0,
                 tile_grid_size=(8, 8),
-                p=0.2,                  # ✅ TĂNG từ 0.15 → 0.2
+                p=float(cfg_get("clahe_p", 0.2)),  # ✅ INCREASED: 0.15 → 0.2
             ),
             
-            # Quality degradation (MỚI - simulate low-quality images)
+            # Quality degradation
             A.OneOf([
-                A.GaussianBlur(blur_limit=(3, 5), p=1.0),  # ✅ TĂNG range
+                A.GaussianBlur(blur_limit=(3, 5), p=1.0),
                 A.MedianBlur(blur_limit=3, p=1.0),
                 A.MotionBlur(blur_limit=3, p=1.0),
-            ], p=0.15),  # ✅ TĂNG từ 0.08 → 0.15
+            ], p=float(cfg_get("blur_p", 0.15))),  # ✅ INCREASED: 0.08 → 0.15
             
+            # ✅ FIXED: GaussNoise API
             A.GaussNoise(
-                var_limit=(5.0, 15.0),  # ✅ TĂNG từ (0,0.02) → (5,15)
-                mean=0,
-                p=0.15,                 # ✅ TĂNG từ 0.1 → 0.15
+                var_limit=(5.0, 15.0),  # Removed 'mean' param
+                p=float(cfg_get("noise_p", 0.15)),  # ✅ INCREASED: 0.10 → 0.15
             ),
             
-            # Occlusion robustness (MỚI - important!)
+            # ✅ FIXED: CoarseDropout API (NEW style)
             A.CoarseDropout(
-                max_holes=3,
-                max_height=16,
-                max_width=16,
-                min_holes=1,
-                min_height=8,
-                min_width=8,
+                num_holes_range=(1, 3),      # min_holes, max_holes
+                hole_height_range=(8, 16),   # min_height, max_height  
+                hole_width_range=(8, 16),    # min_width, max_width
                 fill_value=0,
-                p=0.15,
+                p=float(cfg_get("dropout_p", 0.15)),
             ),
 
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -209,15 +207,13 @@ class GardnerDataset(Dataset):
         return A.Compose(pipeline)
 
     def _build_eval_transform(self):
-        img = int(self.image_size)  # 224
-        resize_size = int(getattr(self, "resize_size", 256))  # 256
+        img = int(self.image_size)
+        resize_size = int(getattr(self, "resize_size", 256))
 
         return A.Compose([
-            # CHANGE THIS:
-            # A.Resize(resize_size, resize_size, interpolation=cv2.INTER_LINEAR),  # ❌ Forces square
-            A.SmallestMaxSize(max_size=resize_size, interpolation=cv2.INTER_LINEAR),  # ✅ Preserves aspect ratio
-            
-            A.CenterCrop(img, img),
+            # ✅ BETTER: Preserve aspect ratio
+            A.SmallestMaxSize(max_size=resize_size, interpolation=cv2.INTER_LINEAR),
+            A.CenterCrop(height=img, width=img),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ])
