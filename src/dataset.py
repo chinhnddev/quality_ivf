@@ -129,6 +129,7 @@ class GardnerDataset(Dataset):
         crop_ratio = tuple(cfg_get("random_resized_crop_ratio", (0.9, 1.1)))
 
         pipeline = [
+            # Base transforms
             A.RandomResizedCrop(
                 size=(img, img),
                 scale=crop_scale,
@@ -136,32 +137,71 @@ class GardnerDataset(Dataset):
                 interpolation=cv2.INTER_LINEAR,
                 p=1.0,
             ),
-            A.HorizontalFlip(p=float(cfg_get("hflip_p", 0.5))),
-            A.VerticalFlip(p=float(cfg_get("vflip_p", 0.10))),
-
-            # very mild geometry only
-            A.Affine(
-                rotate=(-5, 5),
-                translate_percent={"x": (-0.02, 0.02), "y": (-0.02, 0.02)},
-                scale=(0.97, 1.03),
+            
+            # Geometric augmentations (TĂNG!)
+            A.HorizontalFlip(p=0.5),  # ✅ Keep 50%
+            A.VerticalFlip(p=0.5),     # ✅ TĂNG từ 10% → 50%
+            
+            # ShiftScaleRotate (thay thế Affine - mạnh hơn)
+            A.ShiftScaleRotate(
+                shift_limit=0.05,      # ±5% shift
+                scale_limit=0.1,       # ±10% scale
+                rotate_limit=15,       # ✅ ±15° (TĂNG từ ±5°)
                 interpolation=cv2.INTER_LINEAR,
-                p=float(cfg_get("affine_p", 0.25)),
+                border_mode=cv2.BORDER_REFLECT_101,
+                p=0.5,                 # ✅ TĂNG từ 25% → 50%
             ),
-
-            # exposure/contrast robustness (safe for EXP)
-            A.RandomGamma(gamma_limit=(90, 110), p=float(cfg_get("gamma_p", 0.25))),
+            
+            # Color augmentations (TĂNG!)
             A.RandomBrightnessContrast(
-                brightness_limit=0.05,
-                contrast_limit=0.08,
-                p=float(cfg_get("bc_p", 0.25)),
+                brightness_limit=0.15,  # ✅ TĂNG từ 0.05 → 0.15
+                contrast_limit=0.15,    # ✅ TĂNG từ 0.08 → 0.15
+                p=0.4,                  # ✅ TĂNG từ 0.25 → 0.4
             ),
-
-            # CLAHE: optional, light
-            A.CLAHE(clip_limit=1.8, tile_grid_size=(8, 8), p=float(cfg_get("clahe_p", 0.15))),
-
-            # very light blur/noise
-            A.GaussianBlur(blur_limit=(3, 3), p=float(cfg_get("blur_p", 0.08))),
-            A.GaussNoise(std_range=(0.0, 0.02), mean_range=(0.0, 0.0), p=float(cfg_get("noise_p", 0.10))),
+            A.RandomGamma(
+                gamma_limit=(85, 115),  # ✅ TĂNG từ (90,110) → (85,115)
+                p=0.3,                  # ✅ TĂNG từ 0.25 → 0.3
+            ),
+            
+            # Hue/Saturation (MỚI - quan trọng cho microscopy!)
+            A.HueSaturationValue(
+                hue_shift_limit=10,
+                sat_shift_limit=15,
+                val_shift_limit=10,
+                p=0.3,
+            ),
+            
+            # CLAHE (keep mild)
+            A.CLAHE(
+                clip_limit=2.0,         # ✅ Tăng nhẹ từ 1.8 → 2.0
+                tile_grid_size=(8, 8),
+                p=0.2,                  # ✅ TĂNG từ 0.15 → 0.2
+            ),
+            
+            # Quality degradation (MỚI - simulate low-quality images)
+            A.OneOf([
+                A.GaussianBlur(blur_limit=(3, 5), p=1.0),  # ✅ TĂNG range
+                A.MedianBlur(blur_limit=3, p=1.0),
+                A.MotionBlur(blur_limit=3, p=1.0),
+            ], p=0.15),  # ✅ TĂNG từ 0.08 → 0.15
+            
+            A.GaussNoise(
+                var_limit=(5.0, 15.0),  # ✅ TĂNG từ (0,0.02) → (5,15)
+                mean=0,
+                p=0.15,                 # ✅ TĂNG từ 0.1 → 0.15
+            ),
+            
+            # Occlusion robustness (MỚI - important!)
+            A.CoarseDropout(
+                max_holes=3,
+                max_height=16,
+                max_width=16,
+                min_holes=1,
+                min_height=8,
+                min_width=8,
+                fill_value=0,
+                p=0.15,
+            ),
 
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
