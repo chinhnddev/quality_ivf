@@ -186,10 +186,11 @@ class GardnerDataset(Dataset):
                 A.MotionBlur(blur_limit=3, p=1.0),
             ], p=float(cfg_get("blur_p", 0.15))),  # ✅ INCREASED from 0.08
             
-            # ✅ FIXED: GaussNoise API (removed 'mean' param)
+            # ✅ FIXED: GaussNoise API (std_range / mean_range)
             A.GaussNoise(
-                var_limit=(5.0, 15.0),
-                p=float(cfg_get("noise_p", 0.15)),  # ✅ INCREASED from 0.10
+                std_range=(5.0 / 255.0, 15.0 / 255.0),
+                mean_range=(0.0, 0.0),
+                p=float(cfg_get("noise_p", 0.15)),
             ),
             
             # ✅ FIXED: CoarseDropout NEW API
@@ -197,7 +198,7 @@ class GardnerDataset(Dataset):
                 num_holes_range=(1, 3),
                 hole_height_range=(8, 16),
                 hole_width_range=(8, 16),
-                fill_value=0,
+                fill=0,
                 p=float(cfg_get("dropout_p", 0.15)),
             ),
 
@@ -215,10 +216,10 @@ class GardnerDataset(Dataset):
         return A.Compose([
             # ✅ IMPROVED: Preserve aspect ratio
             A.SmallestMaxSize(max_size=resize_size, interpolation=cv2.INTER_LINEAR),
-            
-            # ✅ FIXED: Use 'size' parameter (tuple)
-            A.CenterCrop(size=(img, img)),  # ← MUST BE TUPLE!
-            
+
+            # ✅ FIXED: Provide explicit height/width
+            A.CenterCrop(height=img, width=img),
+
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ])
