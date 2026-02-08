@@ -209,11 +209,14 @@ class GardnerDataset(Dataset):
         return A.Compose(pipeline)
 
     def _build_eval_transform(self):
-        img = int(self.image_size)
-        resize_size = int(getattr(self, "resize_size", 256))
+        img = int(self.image_size)  # 224
+        resize_size = int(getattr(self, "resize_size", 256))  # 256
 
         return A.Compose([
-            A.Resize(resize_size, resize_size, interpolation=cv2.INTER_LINEAR),
+            # CHANGE THIS:
+            # A.Resize(resize_size, resize_size, interpolation=cv2.INTER_LINEAR),  # ❌ Forces square
+            A.SmallestMaxSize(max_size=resize_size, interpolation=cv2.INTER_LINEAR),  # ✅ Preserves aspect ratio
+            
             A.CenterCrop(img, img),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
